@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "migri-appointment"
+version = "0.1.0"
+description = "Simple typed client for Migri appointment slots."
+authors = ["Vadim <vadim@example.com>"]
+readme = "README.md"
+packages = [{ include = "migri_appointment" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+requests = "^2.32.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+
+[build-system]
+requires = ["poetry-core>=1.8.0"]
+build-backend = "poetry.core.masonry.api"

@@ -1,0 +1,6 @@
+.venv/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+notify.log
+.DS_Store
