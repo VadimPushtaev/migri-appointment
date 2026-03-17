@@ -7,6 +7,7 @@ Telegram notifications via AlarmerBot.
 
 - Typed Migri API client (`migri_appointment`) for Helsinki office slots.
 - Notification CLI script (`scripts/notify.py`).
+- Hardcoded Migri category/service selection via `--category` and `--service`.
 - Week selectors support both single week and ranges:
   - `2026:23`
   - `2026:1..2026:20`
@@ -31,39 +32,77 @@ poetry install
 Run with Poetry:
 
 ```bash
-poetry run python scripts/notify.py --alarmer-key "<KEY>" --week 2026:23
+poetry run python scripts/notify.py --alarmer-key "<KEY>" --category citizenship --week 2026:23
 ```
 
-Single week:
+Single-service category (`--service` is auto-selected and must not be passed):
 
 ```bash
-python scripts/notify.py --alarmer-key "<KEY>" --week 2026:23
+python scripts/notify.py --alarmer-key "<KEY>" --category citizenship --week 2026:23
+```
+
+Multi-service category:
+
+```bash
+python scripts/notify.py --alarmer-key "<KEY>" --category residence-permit --service permanent-residence-permit --week 2026:23
 ```
 
 Week range:
 
 ```bash
-python scripts/notify.py --alarmer-key "<KEY>" --week 2026:1..2026:20
+python scripts/notify.py --alarmer-key "<KEY>" --category residence-permit --service work --week 2026:1..2026:20
 ```
 
 Multiple selectors:
 
 ```bash
-python scripts/notify.py --alarmer-key "<KEY>" --week 2026:1..2026:3 --week 2026:26
+python scripts/notify.py --alarmer-key "<KEY>" --category residence-permit --service work --week 2026:1..2026:3 --week 2026:26
 ```
 
 Send "no slots found" notifications too:
 
 ```bash
-python scripts/notify.py --alarmer-key "<KEY>" --week 2026:21..2026:22 --send-no-slots
+python scripts/notify.py --alarmer-key "<KEY>" --category residence-permit --service permanent-residence-permit --week 2026:21..2026:22 --send-no-slots
 ```
+
+## Categories and Services
+
+Categories:
+
+- `citizenship`
+- `eu-registration-brexit`
+- `residence-permit`
+- `temporary-protection`
+- `travel-document`
+
+Services:
+
+- `citizenship`
+  - auto-selected: `citizenship-matters`
+- `eu-registration-brexit`
+  - `eu-citizen-registration`
+  - `family-member-card`
+  - `brexit-appointments`
+- `residence-permit`
+  - `work`
+  - `family`
+  - `study`
+  - `other-grounds`
+  - `permanent-residence-permit`
+  - `renew-permanent-residence-permit-card`
+  - `renew-residence-permit-card`
+- `temporary-protection`
+  - auto-selected: `temporary-protection-residence-permit-card`
+- `travel-document`
+  - `aliens-passport`
+  - `refugee-travel-document`
 
 ## Cron Example
 
 Every 10 minutes, current year weeks 21 and 22, with no-slots messages:
 
 ```cron
-*/10 * * * * ALARMER_KEY="YOUR_ALARMER_KEY" /home/vadim/.local/bin/poetry -C /home/vadim/migri-appointment run python scripts/notify.py --alarmer-key "$ALARMER_KEY" --week "$(date +\%Y):21" --week "$(date +\%Y):22" --send-no-slots >> /home/vadim/migri-appointment/notify.log 2>&1
+*/10 * * * * ALARMER_KEY="YOUR_ALARMER_KEY" /home/vadim/.local/bin/poetry -C /home/vadim/migri-appointment run python scripts/notify.py --alarmer-key "$ALARMER_KEY" --category residence-permit --service permanent-residence-permit --week "$(date +\%Y):21" --week "$(date +\%Y):22" --send-no-slots >> /home/vadim/migri-appointment/notify.log 2>&1
 ```
 
 Note: `%` must be escaped as `\%` in crontab.

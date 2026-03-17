@@ -14,6 +14,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from migri_appointment.client import DEFAULT_BASE_URL, MigriClient
+from migri_appointment.service_catalog import CATEGORIES_BY_SLUG, SERVICE_CATEGORIES, ServiceOption
 from migri_appointment.types import Slot
 
 ALARMBOT_URL = "https://alarmerbot.ru/"
@@ -125,9 +126,56 @@ def build_all_failed_message(failures: list[tuple[int, int, str]]) -> str:
     return f"Migri check failed for all requested weeks: {details}\nOpen Migri: {MIGRI_LINK}"
 
 
+def category_slugs() -> list[str]:
+    return [category.slug for category in SERVICE_CATEGORIES]
+
+
+def resolve_service_selection(
+    parser: argparse.ArgumentParser, category_slug: str, service_slug: str | None
+) -> ServiceOption:
+    category = CATEGORIES_BY_SLUG[category_slug]
+    if len(category.services) == 1:
+        if service_slug is not None:
+            parser.error(
+                f"--service must not be provided for category '{category_slug}'; "
+                f"it auto-selects '{category.services[0].slug}'"
+            )
+        return category.services[0]
+
+    if service_slug is None:
+        valid_services = ", ".join(service.slug for service in category.services)
+        parser.error(
+            f"--service is required for category '{category_slug}'. "
+            f"Valid services: {valid_services}"
+        )
+
+    services_by_slug = {service.slug: service for service in category.services}
+    selected = services_by_slug.get(service_slug)
+    if selected is None:
+        valid_services = ", ".join(service.slug for service in category.services)
+        parser.error(
+            f"invalid --service '{service_slug}' for category '{category_slug}'. "
+            f"Valid services: {valid_services}"
+        )
+    return selected
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Check Migri slots and send AlarmerBot notifications.")
     parser.add_argument("--alarmer-key", required=True, help="AlarmerBot key.")
+    parser.add_argument(
+        "--category",
+        required=True,
+        choices=category_slugs(),
+        help="Hardcoded Migri category slug.",
+    )
+    parser.add_argument(
+        "--service",
+        help=(
+            "Hardcoded service slug for the selected category. Required only when the "
+            "category has multiple services and forbidden when it has only one."
+        ),
+    )
     parser.add_argument(
         "--week",
         dest="weeks",
@@ -152,12 +200,17 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    selected_service = resolve_service_selection(parser, args.category, args.service)
 
     expanded_weeks: list[tuple[int, int]] = []
     for selector in args.weeks:
         expanded_weeks.extend(parse_week_selector(selector))
     weeks = dedupe_weeks(expanded_weeks)
-    client = MigriClient(base_url=args.base_url, language=args.language)
+    client = MigriClient(
+        base_url=args.base_url,
+        language=args.language,
+        service_selection_id=selected_service.service_selection_id,
+    )
 
     available: dict[tuple[int, int], list[Slot]] = {}
     failures: list[tuple[int, int, str]] = []

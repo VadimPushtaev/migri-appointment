@@ -14,11 +14,17 @@ def disable_sleep(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(notify.time, "sleep", lambda _: None)
 
 
-def make_fake_client_factory(mapping: dict[tuple[int, int], object]):
+def make_fake_client_factory(
+    mapping: dict[tuple[int, int], object],
+    expected_service_selection_id: str | None = None,
+):
     class FakeClient:
-        def __init__(self, base_url: str, language: str):
+        def __init__(self, base_url: str, language: str, service_selection_id: str):
             self.base_url = base_url
             self.language = language
+            self.service_selection_id = service_selection_id
+            if expected_service_selection_id is not None:
+                assert service_selection_id == expected_service_selection_id
 
         def get_slots(self, office_name: str, year: int, week: int):
             assert office_name == "helsinki"
@@ -78,13 +84,14 @@ def test_main_sends_when_slots_exist(monkeypatch: pytest.MonkeyPatch):
         notify,
         "MigriClient",
         make_fake_client_factory(
-            {
+            mapping={
                 (2026, 21): [],
                 (2026, 26): [
                     slot_at(2026, 6, 22, 6, 15),
                     slot_at(2026, 6, 22, 5, 15),
                 ],
-            }
+            },
+            expected_service_selection_id="3e03034d-a44b-4771-b1e5-2c4a6f581b7d",
         ),
     )
 
@@ -100,6 +107,10 @@ def test_main_sends_when_slots_exist(monkeypatch: pytest.MonkeyPatch):
         [
             "--alarmer-key",
             "abc-key",
+            "--category",
+            "residence-permit",
+            "--service",
+            "permanent-residence-permit",
             "--week",
             "2026:21",
             "--week",
@@ -124,10 +135,11 @@ def test_main_skips_when_no_slots_and_flag_not_set(monkeypatch: pytest.MonkeyPat
         notify,
         "MigriClient",
         make_fake_client_factory(
-            {
+            mapping={
                 (2026, 21): [],
                 (2026, 22): [],
-            }
+            },
+            expected_service_selection_id="3e03034d-a44b-4771-b1e5-2c4a6f581b7d",
         ),
     )
 
@@ -143,6 +155,10 @@ def test_main_skips_when_no_slots_and_flag_not_set(monkeypatch: pytest.MonkeyPat
         [
             "--alarmer-key",
             "abc-key",
+            "--category",
+            "residence-permit",
+            "--service",
+            "permanent-residence-permit",
             "--week",
             "2026:21",
             "--week",
@@ -159,10 +175,11 @@ def test_main_sends_no_slots_message_when_flag_set(monkeypatch: pytest.MonkeyPat
         notify,
         "MigriClient",
         make_fake_client_factory(
-            {
+            mapping={
                 (2026, 21): [],
                 (2026, 22): [],
-            }
+            },
+            expected_service_selection_id="3e03034d-a44b-4771-b1e5-2c4a6f581b7d",
         ),
     )
 
@@ -178,6 +195,10 @@ def test_main_sends_no_slots_message_when_flag_set(monkeypatch: pytest.MonkeyPat
         [
             "--alarmer-key",
             "abc-key",
+            "--category",
+            "residence-permit",
+            "--service",
+            "permanent-residence-permit",
             "--week",
             "2026:21..2026:22",
             "--send-no-slots",
@@ -197,11 +218,12 @@ def test_main_includes_partial_failures(monkeypatch: pytest.MonkeyPatch):
         notify,
         "MigriClient",
         make_fake_client_factory(
-            {
+            mapping={
                 (2026, 21): [],
                 (2026, 26): RuntimeError("temporary error"),
                 (2026, 27): [sample_slot()],
-            }
+            },
+            expected_service_selection_id="3e03034d-a44b-4771-b1e5-2c4a6f581b7d",
         ),
     )
 
@@ -217,6 +239,10 @@ def test_main_includes_partial_failures(monkeypatch: pytest.MonkeyPatch):
         [
             "--alarmer-key",
             "abc-key",
+            "--category",
+            "residence-permit",
+            "--service",
+            "permanent-residence-permit",
             "--week",
             "2026:21",
             "--week",
@@ -238,10 +264,11 @@ def test_main_all_failed_returns_one(monkeypatch: pytest.MonkeyPatch):
         notify,
         "MigriClient",
         make_fake_client_factory(
-            {
+            mapping={
                 (2026, 21): RuntimeError("boom-21"),
                 (2026, 22): RuntimeError("boom-22"),
-            }
+            },
+            expected_service_selection_id="3e03034d-a44b-4771-b1e5-2c4a6f581b7d",
         ),
     )
 
@@ -257,6 +284,10 @@ def test_main_all_failed_returns_one(monkeypatch: pytest.MonkeyPatch):
         [
             "--alarmer-key",
             "abc-key",
+            "--category",
+            "residence-permit",
+            "--service",
+            "permanent-residence-permit",
             "--week",
             "2026:21",
             "--week",
@@ -275,9 +306,10 @@ def test_main_notification_failure_returns_two(monkeypatch: pytest.MonkeyPatch):
         notify,
         "MigriClient",
         make_fake_client_factory(
-            {
+            mapping={
                 (2026, 26): [sample_slot()],
-            }
+            },
+            expected_service_selection_id="3e03034d-a44b-4771-b1e5-2c4a6f581b7d",
         ),
     )
     monkeypatch.setattr(notify, "send_alarmer_message", lambda *args, **kwargs: False)
@@ -286,6 +318,10 @@ def test_main_notification_failure_returns_two(monkeypatch: pytest.MonkeyPatch):
         [
             "--alarmer-key",
             "abc-key",
+            "--category",
+            "residence-permit",
+            "--service",
+            "permanent-residence-permit",
             "--week",
             "2026:26",
         ]
@@ -318,10 +354,11 @@ def test_main_waits_between_week_fetches(monkeypatch: pytest.MonkeyPatch):
         notify,
         "MigriClient",
         make_fake_client_factory(
-            {
+            mapping={
                 (2026, 21): [],
                 (2026, 22): [],
-            }
+            },
+            expected_service_selection_id="3e03034d-a44b-4771-b1e5-2c4a6f581b7d",
         ),
     )
     monkeypatch.setattr(notify, "send_alarmer_message", lambda *args, **kwargs: True)
@@ -333,6 +370,10 @@ def test_main_waits_between_week_fetches(monkeypatch: pytest.MonkeyPatch):
         [
             "--alarmer-key",
             "abc-key",
+            "--category",
+            "residence-permit",
+            "--service",
+            "permanent-residence-permit",
             "--week",
             "2026:21..2026:22",
             "--send-no-slots",
@@ -341,3 +382,106 @@ def test_main_waits_between_week_fetches(monkeypatch: pytest.MonkeyPatch):
 
     assert rc == 0
     assert sleep_calls == [notify.FETCH_DELAY_SECONDS]
+
+
+def test_main_auto_selects_singleton_category(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        notify,
+        "MigriClient",
+        make_fake_client_factory(
+            expected_service_selection_id="000564ce-b800-4c2e-8040-62f50a09f55e",
+            mapping={
+                (2026, 26): [sample_slot()],
+            },
+        ),
+    )
+    monkeypatch.setattr(notify, "send_alarmer_message", lambda *args, **kwargs: True)
+
+    rc = notify.main(
+        [
+            "--alarmer-key",
+            "abc-key",
+            "--category",
+            "citizenship",
+            "--week",
+            "2026:26",
+        ]
+    )
+
+    assert rc == 0
+
+
+def test_main_rejects_service_for_singleton_category(capsys: pytest.CaptureFixture[str]):
+    with pytest.raises(SystemExit) as exc_info:
+        notify.main(
+            [
+                "--alarmer-key",
+                "abc-key",
+                "--category",
+                "citizenship",
+                "--service",
+                "citizenship-matters",
+                "--week",
+                "2026:26",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "must not be provided" in captured.err
+
+
+def test_main_requires_service_for_multi_service_category(capsys: pytest.CaptureFixture[str]):
+    with pytest.raises(SystemExit) as exc_info:
+        notify.main(
+            [
+                "--alarmer-key",
+                "abc-key",
+                "--category",
+                "residence-permit",
+                "--week",
+                "2026:26",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "--service is required for category 'residence-permit'" in captured.err
+
+
+def test_main_rejects_invalid_service_for_category(capsys: pytest.CaptureFixture[str]):
+    with pytest.raises(SystemExit) as exc_info:
+        notify.main(
+            [
+                "--alarmer-key",
+                "abc-key",
+                "--category",
+                "travel-document",
+                "--service",
+                "work",
+                "--week",
+                "2026:26",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "invalid --service 'work' for category 'travel-document'" in captured.err
+
+
+def test_main_rejects_invalid_category(capsys: pytest.CaptureFixture[str]):
+    with pytest.raises(SystemExit) as exc_info:
+        notify.main(
+            [
+                "--alarmer-key",
+                "abc-key",
+                "--category",
+                "unknown-category",
+                "--week",
+                "2026:26",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "invalid choice: 'unknown-category'" in captured.err
