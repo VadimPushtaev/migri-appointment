@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -62,6 +62,18 @@ def test_parse_week_selector_range():
     ]
 
 
+def test_parse_date_selector_single():
+    assert notify.parse_date_selector("2026-06-22") == [date(2026, 6, 22)]
+
+
+def test_parse_date_selector_range():
+    assert notify.parse_date_selector("2026-12-31..2027-01-02") == [
+        date(2026, 12, 31),
+        date(2027, 1, 1),
+        date(2027, 1, 2),
+    ]
+
+
 @pytest.mark.parametrize(
     "raw_value",
     [
@@ -77,6 +89,21 @@ def test_parse_week_selector_range():
 def test_parse_week_selector_invalid(raw_value: str):
     with pytest.raises(argparse.ArgumentTypeError):
         notify.parse_week_selector(raw_value)
+
+
+@pytest.mark.parametrize(
+    "raw_value",
+    [
+        "2026/06/22",
+        "foo",
+        "2026-02-30",
+        "2026-06-23..2026-06-22",
+        "2026-06-22..oops",
+    ],
+)
+def test_parse_date_selector_invalid(raw_value: str):
+    with pytest.raises(argparse.ArgumentTypeError):
+        notify.parse_date_selector(raw_value)
 
 
 def test_main_sends_when_slots_exist(monkeypatch: pytest.MonkeyPatch):
@@ -382,6 +409,220 @@ def test_main_waits_between_week_fetches(monkeypatch: pytest.MonkeyPatch):
 
     assert rc == 0
     assert sleep_calls == [notify.FETCH_DELAY_SECONDS]
+
+
+def test_main_rejects_missing_week_and_date(capsys: pytest.CaptureFixture[str]):
+    with pytest.raises(SystemExit) as exc_info:
+        notify.main(
+            [
+                "--alarmer-key",
+                "abc-key",
+                "--category",
+                "residence-permit",
+                "--service",
+                "permanent-residence-permit",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "exactly one of --week or --date must be provided" in captured.err
+
+
+def test_main_rejects_mixing_week_and_date(capsys: pytest.CaptureFixture[str]):
+    with pytest.raises(SystemExit) as exc_info:
+        notify.main(
+            [
+                "--alarmer-key",
+                "abc-key",
+                "--category",
+                "residence-permit",
+                "--service",
+                "permanent-residence-permit",
+                "--week",
+                "2026:26",
+                "--date",
+                "2026-06-22",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "exactly one of --week or --date must be provided" in captured.err
+
+
+def test_main_date_mode_sends_when_slots_exist(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        notify,
+        "MigriClient",
+        make_fake_client_factory(
+            mapping={
+                (2026, 26): [
+                    slot_at(2026, 6, 21, 22, 30),
+                    slot_at(2026, 6, 22, 5, 15),
+                    slot_at(2026, 6, 23, 5, 15),
+                ],
+            },
+            expected_service_selection_id="3e03034d-a44b-4771-b1e5-2c4a6f581b7d",
+        ),
+    )
+
+    sent_messages: list[str] = []
+
+    def fake_send(key: str, text: str, timeout_seconds: float = 10.0) -> bool:
+        sent_messages.append(text)
+        return True
+
+    monkeypatch.setattr(notify, "send_alarmer_message", fake_send)
+
+    rc = notify.main(
+        [
+            "--alarmer-key",
+            "abc-key",
+            "--category",
+            "residence-permit",
+            "--service",
+            "permanent-residence-permit",
+            "--date",
+            "2026-06-22",
+        ]
+    )
+
+    assert rc == 0
+    assert len(sent_messages) == 1
+    text = sent_messages[0]
+    assert "- 2026-06-22: 2 slot(s)" in text
+    assert "2026-06-22 01:30 EEST" in text
+    assert "2026-06-22 08:15 EEST" in text
+    assert "2026-06-23" not in text
+    assert "2026:w26" not in text
+
+
+def test_main_date_mode_sends_no_slots_message_when_flag_set(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        notify,
+        "MigriClient",
+        make_fake_client_factory(
+            mapping={
+                (2026, 26): [],
+            },
+            expected_service_selection_id="3e03034d-a44b-4771-b1e5-2c4a6f581b7d",
+        ),
+    )
+
+    sent_messages: list[str] = []
+
+    def fake_send(key: str, text: str, timeout_seconds: float = 10.0) -> bool:
+        sent_messages.append(text)
+        return True
+
+    monkeypatch.setattr(notify, "send_alarmer_message", fake_send)
+
+    rc = notify.main(
+        [
+            "--alarmer-key",
+            "abc-key",
+            "--category",
+            "residence-permit",
+            "--service",
+            "permanent-residence-permit",
+            "--date",
+            "2026-06-22..2026-06-23",
+            "--send-no-slots",
+        ]
+    )
+
+    assert rc == 0
+    assert len(sent_messages) == 1
+    text = sent_messages[0]
+    assert "No slots found for: 2026-06-22, 2026-06-23" in text
+    assert "Failed dates:" not in text
+    assert "2026:w26" not in text
+
+
+def test_main_date_mode_includes_failed_dates(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        notify,
+        "MigriClient",
+        make_fake_client_factory(
+            mapping={
+                (2026, 26): RuntimeError("temporary error"),
+                (2026, 27): [slot_at(2026, 6, 29, 5, 15)],
+            },
+            expected_service_selection_id="3e03034d-a44b-4771-b1e5-2c4a6f581b7d",
+        ),
+    )
+
+    sent_messages: list[str] = []
+
+    def fake_send(key: str, text: str, timeout_seconds: float = 10.0) -> bool:
+        sent_messages.append(text)
+        return True
+
+    monkeypatch.setattr(notify, "send_alarmer_message", fake_send)
+
+    rc = notify.main(
+        [
+            "--alarmer-key",
+            "abc-key",
+            "--category",
+            "residence-permit",
+            "--service",
+            "permanent-residence-permit",
+            "--date",
+            "2026-06-22",
+            "--date",
+            "2026-06-29",
+        ]
+    )
+
+    assert rc == 0
+    assert len(sent_messages) == 1
+    text = sent_messages[0]
+    assert "- 2026-06-29: 1 slot(s)" in text
+    assert "Failed dates: 2026-06-22" in text
+    assert "Failed weeks:" not in text
+
+
+def test_main_date_mode_all_failed_returns_one(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        notify,
+        "MigriClient",
+        make_fake_client_factory(
+            mapping={
+                (2026, 26): RuntimeError("boom-26"),
+            },
+            expected_service_selection_id="3e03034d-a44b-4771-b1e5-2c4a6f581b7d",
+        ),
+    )
+
+    sent_messages: list[str] = []
+
+    def fake_send(key: str, text: str, timeout_seconds: float = 10.0) -> bool:
+        sent_messages.append(text)
+        return True
+
+    monkeypatch.setattr(notify, "send_alarmer_message", fake_send)
+
+    rc = notify.main(
+        [
+            "--alarmer-key",
+            "abc-key",
+            "--category",
+            "residence-permit",
+            "--service",
+            "permanent-residence-permit",
+            "--date",
+            "2026-06-22..2026-06-23",
+        ]
+    )
+
+    assert rc == 1
+    assert len(sent_messages) == 1
+    text = sent_messages[0]
+    assert "failed for all requested dates" in text
+    assert "2026-06-22 (boom-26)" in text
+    assert "2026-06-23 (boom-26)" in text
 
 
 def test_main_auto_selects_singleton_category(monkeypatch: pytest.MonkeyPatch):

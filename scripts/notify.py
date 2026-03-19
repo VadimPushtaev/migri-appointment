@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import sys
 import time
 from typing import Iterable, Sequence
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -20,6 +21,7 @@ from migri_appointment.types import Slot
 ALARMBOT_URL = "https://alarmerbot.ru/"
 MIGRI_LINK = "https://migri.vihta.com/"
 FETCH_DELAY_SECONDS = 2.0
+HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 
 
 def log(message: str) -> None:
@@ -58,8 +60,40 @@ def parse_week_selector(value: str) -> list[tuple[int, int]]:
     return [(start_year, week) for week in range(start_week, end_week + 1)]
 
 
+def parse_date_ref(value: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"Invalid date value '{value}', expected YYYY-MM-DD (e.g. 2026-06-22)"
+        ) from exc
+
+
+def parse_date_selector(value: str) -> list[date]:
+    if ".." not in value:
+        return [parse_date_ref(value)]
+
+    start_raw, end_raw = value.split("..", maxsplit=1)
+    start_date = parse_date_ref(start_raw)
+    end_date = parse_date_ref(end_raw)
+
+    if start_date > end_date:
+        raise argparse.ArgumentTypeError("Date range start must be less than or equal to end")
+
+    result: list[date] = []
+    current = start_date
+    while current <= end_date:
+        result.append(current)
+        current += timedelta(days=1)
+    return result
+
+
 def format_week(year: int, week: int) -> str:
     return f"{year}:w{week:02d}"
+
+
+def format_date_ref(value: date) -> str:
+    return value.isoformat()
 
 
 def format_utc_timestamp(dt: datetime) -> str:
@@ -67,6 +101,13 @@ def format_utc_timestamp(dt: datetime) -> str:
         return dt.isoformat(timespec="minutes")
     utc_dt = dt.astimezone(timezone.utc)
     return utc_dt.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def format_local_timestamp(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        return dt.isoformat(timespec="minutes")
+    local_dt = dt.astimezone(HELSINKI_TZ)
+    return local_dt.strftime("%Y-%m-%d %H:%M %Z")
 
 
 def dedupe_weeks(weeks: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -78,6 +119,66 @@ def dedupe_weeks(weeks: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
         seen.add(item)
         result.append(item)
     return result
+
+
+def dedupe_dates(values: Iterable[date]) -> list[date]:
+    result: list[date] = []
+    seen: set[date] = set()
+    for item in values:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def week_ref_for_date(value: date) -> tuple[int, int]:
+    week_info = value.isocalendar()
+    return week_info.year, week_info.week
+
+
+def dates_to_weeks(values: Iterable[date]) -> list[tuple[int, int]]:
+    return dedupe_weeks(week_ref_for_date(item) for item in values)
+
+
+def slot_local_date(slot: Slot) -> date:
+    return slot.start_time.astimezone(HELSINKI_TZ).date()
+
+
+def filter_slots_for_dates(slots: list[Slot], requested_dates: set[date]) -> list[Slot]:
+    return [slot for slot in slots if slot_local_date(slot) in requested_dates]
+
+
+def failed_dates_from_week_failures(
+    requested_dates: list[date], failures: list[tuple[int, int, str]]
+) -> list[tuple[date, str]]:
+    errors_by_week = {(year, week): error for year, week, error in failures}
+    result: list[tuple[date, str]] = []
+    for requested_date in requested_dates:
+        error = errors_by_week.get(week_ref_for_date(requested_date))
+        if error is not None:
+            result.append((requested_date, error))
+    return result
+
+
+def expand_week_selectors(parser: argparse.ArgumentParser, selectors: Sequence[str]) -> list[tuple[int, int]]:
+    expanded_weeks: list[tuple[int, int]] = []
+    for selector in selectors:
+        try:
+            expanded_weeks.extend(parse_week_selector(selector))
+        except argparse.ArgumentTypeError as exc:
+            parser.error(str(exc))
+    return dedupe_weeks(expanded_weeks)
+
+
+def expand_date_selectors(parser: argparse.ArgumentParser, selectors: Sequence[str]) -> list[date]:
+    expanded_dates: list[date] = []
+    for selector in selectors:
+        try:
+            expanded_dates.extend(parse_date_selector(selector))
+        except argparse.ArgumentTypeError as exc:
+            parser.error(str(exc))
+    return dedupe_dates(expanded_dates)
 
 
 def send_alarmer_message(key: str, text: str, timeout_seconds: float = 10.0) -> bool:
@@ -92,7 +193,7 @@ def send_alarmer_message(key: str, text: str, timeout_seconds: float = 10.0) -> 
     return response.ok
 
 
-def build_slots_message(
+def build_slots_message_by_week(
     available: dict[tuple[int, int], list[Slot]],
     failures: list[tuple[int, int, str]],
 ) -> str:
@@ -111,7 +212,28 @@ def build_slots_message(
     return "\n".join(lines)
 
 
-def build_no_slots_message(weeks: list[tuple[int, int]], failures: list[tuple[int, int, str]]) -> str:
+def build_slots_message_by_date(
+    available: dict[date, list[Slot]],
+    failures: list[tuple[date, str]],
+) -> str:
+    lines = ["Migri slots available:"]
+    for selected_date, slots in available.items():
+        sorted_slots = sorted(slots, key=lambda slot: slot.start_time)
+        lines.append(f"- {format_date_ref(selected_date)}: {len(sorted_slots)} slot(s)")
+        for slot in sorted_slots:
+            lines.append(f"  {format_local_timestamp(slot.start_time)}")
+
+    if failures:
+        failed_dates = ", ".join(format_date_ref(selected_date) for selected_date, _ in failures)
+        lines.append(f"Failed dates: {failed_dates}")
+
+    lines.append(f"Open Migri: {MIGRI_LINK}")
+    return "\n".join(lines)
+
+
+def build_no_slots_message_by_week(
+    weeks: list[tuple[int, int]], failures: list[tuple[int, int, str]]
+) -> str:
     checked = ", ".join(format_week(year, week) for year, week in weeks)
     lines = [f"No slots found for: {checked}"]
     if failures:
@@ -121,9 +243,24 @@ def build_no_slots_message(weeks: list[tuple[int, int]], failures: list[tuple[in
     return "\n".join(lines)
 
 
-def build_all_failed_message(failures: list[tuple[int, int, str]]) -> str:
+def build_no_slots_message_by_date(dates: list[date], failures: list[tuple[date, str]]) -> str:
+    checked = ", ".join(format_date_ref(value) for value in dates)
+    lines = [f"No slots found for: {checked}"]
+    if failures:
+        failed_dates = ", ".join(format_date_ref(selected_date) for selected_date, _ in failures)
+        lines.append(f"Failed dates: {failed_dates}")
+    lines.append(f"Open Migri: {MIGRI_LINK}")
+    return "\n".join(lines)
+
+
+def build_all_failed_message_by_week(failures: list[tuple[int, int, str]]) -> str:
     details = "; ".join(f"{format_week(y, w)} ({err})" for y, w, err in failures)
     return f"Migri check failed for all requested weeks: {details}\nOpen Migri: {MIGRI_LINK}"
+
+
+def build_all_failed_message_by_date(failures: list[tuple[date, str]]) -> str:
+    details = "; ".join(f"{format_date_ref(selected_date)} ({err})" for selected_date, err in failures)
+    return f"Migri check failed for all requested dates: {details}\nOpen Migri: {MIGRI_LINK}"
 
 
 def category_slugs() -> list[str]:
@@ -181,10 +318,19 @@ def build_parser() -> argparse.ArgumentParser:
         dest="weeks",
         action="append",
         type=str,
-        required=True,
         help=(
             "Week selector in YEAR:WEEK format or range YEAR:WEEK..YEAR:WEEK "
             "(e.g. 2026:1..2026:20). Repeat this flag to pass multiple selectors."
+        ),
+    )
+    parser.add_argument(
+        "--date",
+        dest="dates",
+        action="append",
+        type=str,
+        help=(
+            "Date selector in YYYY-MM-DD format or range YYYY-MM-DD..YYYY-MM-DD "
+            "(e.g. 2026-06-22..2026-06-24). Repeat this flag to pass multiple selectors."
         ),
     )
     parser.add_argument(
@@ -201,19 +347,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     selected_service = resolve_service_selection(parser, args.category, args.service)
+    has_weeks = bool(args.weeks)
+    has_dates = bool(args.dates)
+    if has_weeks == has_dates:
+        parser.error("exactly one of --week or --date must be provided")
 
-    expanded_weeks: list[tuple[int, int]] = []
-    for selector in args.weeks:
-        expanded_weeks.extend(parse_week_selector(selector))
-    weeks = dedupe_weeks(expanded_weeks)
+    requested_dates: list[date] | None = None
+    if has_weeks:
+        weeks = expand_week_selectors(parser, args.weeks)
+    else:
+        requested_dates = expand_date_selectors(parser, args.dates)
+        weeks = dates_to_weeks(requested_dates)
+
     client = MigriClient(
         base_url=args.base_url,
         language=args.language,
         service_selection_id=selected_service.service_selection_id,
     )
 
-    available: dict[tuple[int, int], list[Slot]] = {}
+    available_by_week: dict[tuple[int, int], list[Slot]] = {}
+    available_by_date: dict[date, list[Slot]] = {}
     failures: list[tuple[int, int, str]] = []
+    requested_date_set = set(requested_dates or [])
 
     for index, (year, week) in enumerate(weeks):
         if index > 0:
@@ -228,11 +383,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             continue
 
         log(f"Fetched {format_week(year, week)}: {len(slots)} slot(s)")
-        if slots:
-            available[(year, week)] = slots
+        if has_weeks:
+            if slots:
+                available_by_week[(year, week)] = slots
+            continue
+
+        filtered_slots = filter_slots_for_dates(slots, requested_date_set)
+        for slot in filtered_slots:
+            selected_date = slot_local_date(slot)
+            available_by_date.setdefault(selected_date, []).append(slot)
 
     if len(failures) == len(weeks):
-        message = build_all_failed_message(failures)
+        if has_weeks:
+            message = build_all_failed_message_by_week(failures)
+        else:
+            failed_dates = failed_dates_from_week_failures(requested_dates or [], failures)
+            message = build_all_failed_message_by_date(failed_dates)
         try:
             sent = send_alarmer_message(args.alarmer_key, message)
         except requests.RequestException as exc:
@@ -243,15 +409,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         return 1
 
-    should_send = bool(available) or args.send_no_slots
+    if has_weeks:
+        available = available_by_week
+        should_send = bool(available) or args.send_no_slots
+    else:
+        ordered_available_by_date = {
+            requested_date: available_by_date[requested_date]
+            for requested_date in requested_dates or []
+            if requested_date in available_by_date
+        }
+        available = ordered_available_by_date
+        should_send = bool(available) or args.send_no_slots
+
     if not should_send:
         log("No slots found; notification skipped (use --send-no-slots to enable).")
         return 0
 
-    if available:
-        message = build_slots_message(available=available, failures=failures)
+    if has_weeks:
+        if available:
+            message = build_slots_message_by_week(available=available, failures=failures)
+        else:
+            message = build_no_slots_message_by_week(weeks=weeks, failures=failures)
     else:
-        message = build_no_slots_message(weeks=weeks, failures=failures)
+        failed_dates = failed_dates_from_week_failures(requested_dates or [], failures)
+        if available:
+            message = build_slots_message_by_date(available=available, failures=failed_dates)
+        else:
+            message = build_no_slots_message_by_date(
+                dates=requested_dates or [], failures=failed_dates
+            )
 
     try:
         sent = send_alarmer_message(args.alarmer_key, message)

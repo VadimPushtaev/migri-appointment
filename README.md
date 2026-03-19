@@ -11,6 +11,10 @@ Telegram notifications via AlarmerBot.
 - Week selectors support both single week and ranges:
   - `2026:23`
   - `2026:1..2026:20`
+- Date selectors support both single dates and ranges:
+  - `2026-06-22`
+  - `2026-06-22..2026-06-24`
+- Exactly one of `--week` or `--date` must be provided.
 - Optional no-slots notifications (`--send-no-slots`).
 - Slot messages include every slot timestamp and a clickable Migri link.
 - Timestamped logs with Alarmer request URL + response for debugging.
@@ -41,6 +45,18 @@ Single-service category (`--service` is auto-selected and must not be passed):
 python scripts/notify.py --alarmer-key "<KEY>" --category citizenship --week 2026:23
 ```
 
+Date-based selection:
+
+```bash
+python scripts/notify.py --alarmer-key "<KEY>" --category citizenship --date 2026-06-22
+```
+
+Date range:
+
+```bash
+python scripts/notify.py --alarmer-key "<KEY>" --category residence-permit --service work --date 2026-06-22..2026-06-24
+```
+
 Multi-service category:
 
 ```bash
@@ -64,6 +80,8 @@ Send "no slots found" notifications too:
 ```bash
 python scripts/notify.py --alarmer-key "<KEY>" --category residence-permit --service permanent-residence-permit --week 2026:21..2026:22 --send-no-slots
 ```
+
+You may use either `--week` or `--date`, but not both in the same command.
 
 ## Categories and Services
 
@@ -99,10 +117,10 @@ Services:
 
 ## Cron Example
 
-Every 10 minutes, current year weeks 21 and 22, with no-slots messages:
+Every 10 minutes, check today and tomorrow in Helsinki local dates, with no-slots messages:
 
 ```cron
-*/10 * * * * ALARMER_KEY="YOUR_ALARMER_KEY" /home/vadim/.local/bin/poetry -C /home/vadim/migri-appointment run python scripts/notify.py --alarmer-key "$ALARMER_KEY" --category residence-permit --service permanent-residence-permit --week "$(date +\%Y):21" --week "$(date +\%Y):22" --send-no-slots >> /home/vadim/migri-appointment/notify.log 2>&1
+*/10 * * * * ALARMER_KEY="YOUR_ALARMER_KEY" /home/vadim/.local/bin/poetry -C /home/vadim/migri-appointment run python scripts/notify.py --alarmer-key "$ALARMER_KEY" --category residence-permit --service permanent-residence-permit --date "$(date +\%F)" --date "$(date -d '+1 day' +\%F)" --send-no-slots >> /home/vadim/migri-appointment/notify.log 2>&1
 ```
 
 Note: `%` must be escaped as `\%` in crontab.
@@ -112,6 +130,7 @@ Note: `%` must be escaped as `\%` in crontab.
 The script logs:
 
 - fetch result per week with timestamps
+- date-mode notifications are filtered by Helsinki local calendar date
 - sleep intervals between requests
 - exact Alarmer request URL
 - Alarmer response status + body
