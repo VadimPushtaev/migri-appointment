@@ -157,6 +157,33 @@ def test_main_sends_when_slots_exist(monkeypatch: pytest.MonkeyPatch):
     assert f"Open Migri: {notify.MIGRI_LINK}" in text
 
 
+def test_slots_message_caps_large_date_result():
+    message = notify.build_slots_message_by_date(
+        available={
+            date(2026, 6, 29): [slot_at(2026, 6, 29, 12, 15)],
+            date(2026, 7, 3): [
+                slot_at(2026, 7, 3, 5, 15),
+                slot_at(2026, 7, 3, 5, 45),
+                slot_at(2026, 7, 3, 7, 30),
+            ],
+            date(2026, 7, 6): [
+                slot_at(2026, 7, 6, 5, 45),
+                slot_at(2026, 7, 6, 6, 15),
+            ],
+        },
+        failures=[],
+        max_slots=4,
+    )
+
+    assert "Showing earliest 4 of 6 slot(s)." in message
+    assert "- 2026-06-29: 1 slot(s)" in message
+    assert "- 2026-07-03: 3 slot(s)" in message
+    assert "2026-07-03 10:30 EEST" in message
+    assert "- 2026-07-06" not in message
+    assert "Omitted 2 later slot(s)." in message
+    assert f"Open Migri: {notify.MIGRI_LINK}" in message
+
+
 def test_main_skips_when_no_slots_and_flag_not_set(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         notify,
@@ -363,7 +390,7 @@ def test_send_alarmer_message_logs_url_and_response(
     class FakeResponse:
         ok = True
         status_code = 200
-        url = "https://alarmerbot.ru/?key=test-key&message=test-message"
+        url = "https://alarmerbot.getmy.dev/?key=test-key&message=test-message"
         text = "OK"
 
     monkeypatch.setattr(notify.requests, "get", lambda *args, **kwargs: FakeResponse())
@@ -372,8 +399,35 @@ def test_send_alarmer_message_logs_url_and_response(
 
     assert result is True
     captured = capsys.readouterr().out
-    assert "Alarmer request URL: https://alarmerbot.ru/?key=test-key&message=test-message" in captured
+    assert "Alarmer request URL: https://alarmerbot.getmy.dev/ (redacted" in captured
+    assert "key=test-key" not in captured
+    assert "message=test-message" not in captured
     assert "Alarmer response status=200 body=OK" in captured
+
+
+def test_send_alarmer_message_truncates_oversized_message(monkeypatch: pytest.MonkeyPatch):
+    captured_params: list[dict[str, str]] = []
+
+    class FakeResponse:
+        ok = True
+        status_code = 200
+        url = "https://alarmerbot.getmy.dev/?redacted"
+        text = "OK"
+
+    def fake_get(url: str, params: dict[str, str], timeout: float):
+        captured_params.append(params)
+        return FakeResponse()
+
+    monkeypatch.setattr(notify.requests, "get", fake_get)
+
+    result = notify.send_alarmer_message("test-key", "x" * 3000)
+
+    assert result is True
+    assert len(captured_params) == 1
+    message = captured_params[0]["message"]
+    assert len(message) == notify.MAX_ALARMER_MESSAGE_CHARS
+    assert "message truncated" in message
+    assert f"Open Migri: {notify.MIGRI_LINK}" in message
 
 
 def test_main_waits_between_week_fetches(monkeypatch: pytest.MonkeyPatch):
@@ -449,6 +503,28 @@ def test_main_rejects_mixing_week_and_date(capsys: pytest.CaptureFixture[str]):
     assert exc_info.value.code == 2
     captured = capsys.readouterr()
     assert "exactly one of --week or --date must be provided" in captured.err
+
+
+def test_main_rejects_invalid_max_notification_slots(capsys: pytest.CaptureFixture[str]):
+    with pytest.raises(SystemExit) as exc_info:
+        notify.main(
+            [
+                "--alarmer-key",
+                "abc-key",
+                "--category",
+                "residence-permit",
+                "--service",
+                "permanent-residence-permit",
+                "--week",
+                "2026:26",
+                "--max-notification-slots",
+                "0",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "--max-notification-slots must be at least 1" in captured.err
 
 
 def test_main_date_mode_sends_when_slots_exist(monkeypatch: pytest.MonkeyPatch):

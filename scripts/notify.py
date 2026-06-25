@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import sys
 import time
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 from zoneinfo import ZoneInfo
 
 import requests
@@ -18,9 +18,11 @@ from migri_appointment.client import DEFAULT_BASE_URL, MigriClient
 from migri_appointment.service_catalog import CATEGORIES_BY_SLUG, SERVICE_CATEGORIES, ServiceOption
 from migri_appointment.types import Slot
 
-ALARMBOT_URL = "https://alarmerbot.ru/"
+ALARMBOT_URL = "https://alarmerbot.getmy.dev/"
 MIGRI_LINK = "https://migri.vihta.com/"
 FETCH_DELAY_SECONDS = 2.0
+DEFAULT_MAX_NOTIFICATION_SLOTS = 20
+MAX_ALARMER_MESSAGE_CHARS = 1800
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 
 
@@ -181,28 +183,84 @@ def expand_date_selectors(parser: argparse.ArgumentParser, selectors: Sequence[s
     return dedupe_dates(expanded_dates)
 
 
+def truncate_alarmer_message(text: str, max_chars: int = MAX_ALARMER_MESSAGE_CHARS) -> str:
+    if len(text) <= max_chars:
+        return text
+
+    suffix = f"\n... message truncated to {max_chars} chars.\nOpen Migri: {MIGRI_LINK}"
+    if len(suffix) >= max_chars:
+        return suffix[:max_chars]
+
+    return text[: max_chars - len(suffix)].rstrip() + suffix
+
+
 def send_alarmer_message(key: str, text: str, timeout_seconds: float = 10.0) -> bool:
+    original_text_length = len(text)
+    text = truncate_alarmer_message(text)
     response = requests.get(
         ALARMBOT_URL,
         params={"key": key, "message": text},
         timeout=timeout_seconds,
     )
     response_text = response.text if response.text else "<empty>"
-    log(f"Alarmer request URL: {response.url}")
+    log(
+        "Alarmer request URL: "
+        f"{ALARMBOT_URL} (redacted, url_length={len(response.url)}, "
+        f"message_length={len(text)}, original_message_length={original_text_length})"
+    )
     log(f"Alarmer response status={response.status_code} body={response_text}")
     return response.ok
+
+
+def append_slot_lines(
+    lines: list[str],
+    grouped_slots: Iterable[tuple[str, list[Slot]]],
+    *,
+    max_slots: int,
+    format_slot: Callable[[datetime], str],
+) -> None:
+    groups = [(label, sorted(slots, key=lambda slot: slot.start_time)) for label, slots in grouped_slots]
+    total_slots = sum(len(slots) for _, slots in groups)
+    shown_slots = 0
+
+    if total_slots > max_slots:
+        lines.append(f"Showing earliest {max_slots} of {total_slots} slot(s).")
+
+    for label, slots in groups:
+        if shown_slots >= max_slots:
+            break
+
+        remaining = max_slots - shown_slots
+        displayed_slots = slots[:remaining]
+        if not displayed_slots:
+            continue
+
+        if len(displayed_slots) == len(slots):
+            lines.append(f"- {label}: {len(slots)} slot(s)")
+        else:
+            lines.append(f"- {label}: {len(slots)} slot(s), showing first {len(displayed_slots)}")
+
+        for slot in displayed_slots:
+            lines.append(f"  {format_slot(slot.start_time)}")
+        shown_slots += len(displayed_slots)
+
+    omitted_slots = total_slots - shown_slots
+    if omitted_slots > 0:
+        lines.append(f"Omitted {omitted_slots} later slot(s).")
 
 
 def build_slots_message_by_week(
     available: dict[tuple[int, int], list[Slot]],
     failures: list[tuple[int, int, str]],
+    max_slots: int = DEFAULT_MAX_NOTIFICATION_SLOTS,
 ) -> str:
     lines = ["Migri slots available:"]
-    for (year, week), slots in available.items():
-        sorted_slots = sorted(slots, key=lambda slot: slot.start_time)
-        lines.append(f"- {format_week(year, week)}: {len(sorted_slots)} slot(s)")
-        for slot in sorted_slots:
-            lines.append(f"  {format_utc_timestamp(slot.start_time)}")
+    append_slot_lines(
+        lines,
+        ((format_week(year, week), slots) for (year, week), slots in available.items()),
+        max_slots=max_slots,
+        format_slot=format_utc_timestamp,
+    )
 
     if failures:
         failed_weeks = ", ".join(format_week(year, week) for year, week, _ in failures)
@@ -215,13 +273,15 @@ def build_slots_message_by_week(
 def build_slots_message_by_date(
     available: dict[date, list[Slot]],
     failures: list[tuple[date, str]],
+    max_slots: int = DEFAULT_MAX_NOTIFICATION_SLOTS,
 ) -> str:
     lines = ["Migri slots available:"]
-    for selected_date, slots in available.items():
-        sorted_slots = sorted(slots, key=lambda slot: slot.start_time)
-        lines.append(f"- {format_date_ref(selected_date)}: {len(sorted_slots)} slot(s)")
-        for slot in sorted_slots:
-            lines.append(f"  {format_local_timestamp(slot.start_time)}")
+    append_slot_lines(
+        lines,
+        ((format_date_ref(selected_date), slots) for selected_date, slots in available.items()),
+        max_slots=max_slots,
+        format_slot=format_local_timestamp,
+    )
 
     if failures:
         failed_dates = ", ".join(format_date_ref(selected_date) for selected_date, _ in failures)
@@ -338,6 +398,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help='Send "no slots found" notification when no availability is found.',
     )
+    parser.add_argument(
+        "--max-notification-slots",
+        type=int,
+        default=DEFAULT_MAX_NOTIFICATION_SLOTS,
+        help=(
+            "Maximum number of slot timestamps to include in one notification "
+            f"(default: {DEFAULT_MAX_NOTIFICATION_SLOTS})."
+        ),
+    )
     parser.add_argument("--language", default="fi", help="Migri language code (default: fi).")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Migri API base URL.")
     return parser
@@ -346,6 +415,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.max_notification_slots < 1:
+        parser.error("--max-notification-slots must be at least 1")
+
     selected_service = resolve_service_selection(parser, args.category, args.service)
     has_weeks = bool(args.weeks)
     has_dates = bool(args.dates)
@@ -427,13 +499,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if has_weeks:
         if available:
-            message = build_slots_message_by_week(available=available, failures=failures)
+            message = build_slots_message_by_week(
+                available=available,
+                failures=failures,
+                max_slots=args.max_notification_slots,
+            )
         else:
             message = build_no_slots_message_by_week(weeks=weeks, failures=failures)
     else:
         failed_dates = failed_dates_from_week_failures(requested_dates or [], failures)
         if available:
-            message = build_slots_message_by_date(available=available, failures=failed_dates)
+            message = build_slots_message_by_date(
+                available=available,
+                failures=failed_dates,
+                max_slots=args.max_notification_slots,
+            )
         else:
             message = build_no_slots_message_by_date(
                 dates=requested_dates or [], failures=failed_dates

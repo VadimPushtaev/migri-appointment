@@ -17,6 +17,8 @@ Telegram notifications via AlarmerBot.
 - Exactly one of `--week` or `--date` must be provided.
 - Optional no-slots notifications (`--send-no-slots`).
 - Slot messages include every slot timestamp and a clickable Migri link.
+- Large slot messages are capped to the earliest 20 slot timestamps by default
+  to fit AlarmerBot URL limits.
 - Timestamped logs with Alarmer request URL + response for debugging.
 - 2 second delay between week fetches to reduce request burst.
 
@@ -79,6 +81,12 @@ Send "no slots found" notifications too:
 
 ```bash
 python scripts/notify.py --alarmer-key "<KEY>" --category residence-permit --service permanent-residence-permit --week 2026:21..2026:22 --send-no-slots
+```
+
+Increase the number of slot timestamps included in a notification:
+
+```bash
+python scripts/notify.py --alarmer-key "<KEY>" --category residence-permit --service permanent-residence-permit --date 2026-06-22..2026-12-19 --max-notification-slots 40
 ```
 
 You may use either `--week` or `--date`, but not both in the same command.
