@@ -132,6 +132,42 @@ def test_get_slots_empty_week_returns_empty_list(monkeypatch: pytest.MonkeyPatch
     assert slots == []
 
 
+@pytest.mark.parametrize(
+    ("city", "office_id"),
+    [
+        ("helsinki", "438cd01e-9d81-40d9-b31d-5681c11bd974"),
+        ("turku", "074cc6f8-735b-4ea5-ad9a-9e517fef09bb"),
+        ("raisio", "074cc6f8-735b-4ea5-ad9a-9e517fef09bb"),
+        ("tampere", "08d44a6b-af37-4a30-8462-1d6f5fc5cd61"),
+        ("oulu", "a4657f2f-eacd-4668-9c2b-92a7cdd44408"),
+        ("lahti", "a893849c-c0d9-489b-92a3-6dd8a36ef9f9"),
+        ("kuopio", "10a1fb12-3783-4a3b-a532-468b93bb85c9"),
+        ("lappeenranta", "b84cfd93-4cf9-40e7-ad79-78aca8c422a0"),
+        ("vaasa", "6b5d9667-e526-4136-af5a-b1d20f5d01b3"),
+        ("rovaniemi", "891474c3-f7ee-4fe8-a542-38169726503a"),
+        ("aland", "87558cb4-975b-46e9-a411-51ca67c56a08"),
+        ("ÅLAND", "87558cb4-975b-46e9-a411-51ca67c56a08"),
+        ("ahvenanmaa", "87558cb4-975b-46e9-a411-51ca67c56a08"),
+        ("ahvenanmaa-aland", "87558cb4-975b-46e9-a411-51ca67c56a08"),
+        ("mariehamn", "87558cb4-975b-46e9-a411-51ca67c56a08"),
+    ],
+)
+def test_get_slots_resolves_supported_city(
+    monkeypatch: pytest.MonkeyPatch, city: str, office_id: str
+):
+    fake_session, client = make_client(
+        monkeypatch,
+        responses=[
+            FakeResponse(200, {"id": "session-123"}),
+            FakeResponse(200, {"resources": [], "dailyTimesByOffice": [[], [], [], [], [], [], []]}),
+        ],
+    )
+
+    client.get_slots(city, 2026, 21)
+
+    assert fake_session.calls[1]["url"].endswith(f"/offices/{office_id}/2026/w21")
+
+
 def test_unsupported_office_raises(monkeypatch: pytest.MonkeyPatch):
     _, client = make_client(monkeypatch, responses=[])
     with pytest.raises(UnsupportedOfficeError):

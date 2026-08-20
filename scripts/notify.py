@@ -15,6 +15,12 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from migri_appointment.client import DEFAULT_BASE_URL, MigriClient
+from migri_appointment.office_catalog import (
+    CITY_SLUGS,
+    DEFAULT_CITY_SLUG,
+    OFFICES_BY_CITY_SLUG,
+    normalize_city_slug,
+)
 from migri_appointment.service_catalog import CATEGORIES_BY_SLUG, SERVICE_CATEGORIES, ServiceOption
 from migri_appointment.types import Slot
 
@@ -253,8 +259,9 @@ def build_slots_message_by_week(
     available: dict[tuple[int, int], list[Slot]],
     failures: list[tuple[int, int, str]],
     max_slots: int = DEFAULT_MAX_NOTIFICATION_SLOTS,
+    city_label: str = "Helsinki",
 ) -> str:
-    lines = ["Migri slots available:"]
+    lines = [f"Migri slots available in {city_label}:"]
     append_slot_lines(
         lines,
         ((format_week(year, week), slots) for (year, week), slots in available.items()),
@@ -274,8 +281,9 @@ def build_slots_message_by_date(
     available: dict[date, list[Slot]],
     failures: list[tuple[date, str]],
     max_slots: int = DEFAULT_MAX_NOTIFICATION_SLOTS,
+    city_label: str = "Helsinki",
 ) -> str:
-    lines = ["Migri slots available:"]
+    lines = [f"Migri slots available in {city_label}:"]
     append_slot_lines(
         lines,
         ((format_date_ref(selected_date), slots) for selected_date, slots in available.items()),
@@ -292,10 +300,12 @@ def build_slots_message_by_date(
 
 
 def build_no_slots_message_by_week(
-    weeks: list[tuple[int, int]], failures: list[tuple[int, int, str]]
+    weeks: list[tuple[int, int]],
+    failures: list[tuple[int, int, str]],
+    city_label: str = "Helsinki",
 ) -> str:
     checked = ", ".join(format_week(year, week) for year, week in weeks)
-    lines = [f"No slots found for: {checked}"]
+    lines = [f"No slots found in {city_label} for: {checked}"]
     if failures:
         failed_weeks = ", ".join(format_week(year, week) for year, week, _ in failures)
         lines.append(f"Failed weeks: {failed_weeks}")
@@ -303,9 +313,11 @@ def build_no_slots_message_by_week(
     return "\n".join(lines)
 
 
-def build_no_slots_message_by_date(dates: list[date], failures: list[tuple[date, str]]) -> str:
+def build_no_slots_message_by_date(
+    dates: list[date], failures: list[tuple[date, str]], city_label: str = "Helsinki"
+) -> str:
     checked = ", ".join(format_date_ref(value) for value in dates)
-    lines = [f"No slots found for: {checked}"]
+    lines = [f"No slots found in {city_label} for: {checked}"]
     if failures:
         failed_dates = ", ".join(format_date_ref(selected_date) for selected_date, _ in failures)
         lines.append(f"Failed dates: {failed_dates}")
@@ -313,14 +325,24 @@ def build_no_slots_message_by_date(dates: list[date], failures: list[tuple[date,
     return "\n".join(lines)
 
 
-def build_all_failed_message_by_week(failures: list[tuple[int, int, str]]) -> str:
+def build_all_failed_message_by_week(
+    failures: list[tuple[int, int, str]], city_label: str = "Helsinki"
+) -> str:
     details = "; ".join(f"{format_week(y, w)} ({err})" for y, w, err in failures)
-    return f"Migri check failed for all requested weeks: {details}\nOpen Migri: {MIGRI_LINK}"
+    return (
+        f"Migri check failed for all requested weeks in {city_label}: {details}"
+        f"\nOpen Migri: {MIGRI_LINK}"
+    )
 
 
-def build_all_failed_message_by_date(failures: list[tuple[date, str]]) -> str:
+def build_all_failed_message_by_date(
+    failures: list[tuple[date, str]], city_label: str = "Helsinki"
+) -> str:
     details = "; ".join(f"{format_date_ref(selected_date)} ({err})" for selected_date, err in failures)
-    return f"Migri check failed for all requested dates: {details}\nOpen Migri: {MIGRI_LINK}"
+    return (
+        f"Migri check failed for all requested dates in {city_label}: {details}"
+        f"\nOpen Migri: {MIGRI_LINK}"
+    )
 
 
 def category_slugs() -> list[str]:
@@ -360,6 +382,13 @@ def resolve_service_selection(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Check Migri slots and send AlarmerBot notifications.")
     parser.add_argument("--alarmer-key", required=True, help="AlarmerBot key.")
+    parser.add_argument(
+        "--city",
+        type=normalize_city_slug,
+        choices=CITY_SLUGS,
+        default=DEFAULT_CITY_SLUG,
+        help=f"Migri office city (default: {DEFAULT_CITY_SLUG}).",
+    )
     parser.add_argument(
         "--category",
         required=True,
@@ -418,6 +447,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.max_notification_slots < 1:
         parser.error("--max-notification-slots must be at least 1")
 
+    selected_office = OFFICES_BY_CITY_SLUG[args.city]
+    city_label = selected_office.display_name
     selected_service = resolve_service_selection(parser, args.category, args.service)
     has_weeks = bool(args.weeks)
     has_dates = bool(args.dates)
@@ -448,13 +479,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             time.sleep(FETCH_DELAY_SECONDS)
 
         try:
-            slots = client.get_slots("helsinki", year, week)
+            slots = client.get_slots(args.city, year, week)
         except Exception as exc:
             failures.append((year, week, str(exc)))
-            log(f"Failed to fetch {format_week(year, week)}: {exc}")
+            log(f"Failed to fetch {city_label} {format_week(year, week)}: {exc}")
             continue
 
-        log(f"Fetched {format_week(year, week)}: {len(slots)} slot(s)")
+        log(f"Fetched {city_label} {format_week(year, week)}: {len(slots)} slot(s)")
         if has_weeks:
             if slots:
                 available_by_week[(year, week)] = slots
@@ -467,10 +498,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if len(failures) == len(weeks):
         if has_weeks:
-            message = build_all_failed_message_by_week(failures)
+            message = build_all_failed_message_by_week(failures, city_label=city_label)
         else:
             failed_dates = failed_dates_from_week_failures(requested_dates or [], failures)
-            message = build_all_failed_message_by_date(failed_dates)
+            message = build_all_failed_message_by_date(failed_dates, city_label=city_label)
         try:
             sent = send_alarmer_message(args.alarmer_key, message)
         except requests.RequestException as exc:
@@ -494,7 +525,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         should_send = bool(available) or args.send_no_slots
 
     if not should_send:
-        log("No slots found; notification skipped (use --send-no-slots to enable).")
+        log(
+            f"No slots found in {city_label}; notification skipped "
+            "(use --send-no-slots to enable)."
+        )
         return 0
 
     if has_weeks:
@@ -503,9 +537,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 available=available,
                 failures=failures,
                 max_slots=args.max_notification_slots,
+                city_label=city_label,
             )
         else:
-            message = build_no_slots_message_by_week(weeks=weeks, failures=failures)
+            message = build_no_slots_message_by_week(
+                weeks=weeks, failures=failures, city_label=city_label
+            )
     else:
         failed_dates = failed_dates_from_week_failures(requested_dates or [], failures)
         if available:
@@ -513,10 +550,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 available=available,
                 failures=failed_dates,
                 max_slots=args.max_notification_slots,
+                city_label=city_label,
             )
         else:
             message = build_no_slots_message_by_date(
-                dates=requested_dates or [], failures=failed_dates
+                dates=requested_dates or [], failures=failed_dates, city_label=city_label
             )
 
     try:

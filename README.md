@@ -5,8 +5,9 @@ Telegram notifications via AlarmerBot.
 
 ## Features
 
-- Typed Migri API client (`migri_appointment`) for Helsinki office slots.
+- Typed Migri API client (`migri_appointment`) for Migri office slots across Finland.
 - Notification CLI script (`scripts/notify.py`).
+- City selection via `--city`, defaulting to Helsinki.
 - Hardcoded Migri category/service selection via `--category` and `--service`.
 - Week selectors support both single week and ranges:
   - `2026:23`
@@ -59,6 +60,12 @@ Date range:
 python scripts/notify.py --alarmer-key "<KEY>" --category residence-permit --service work --date 2026-06-22..2026-06-24
 ```
 
+Choose a city (case-insensitive):
+
+```bash
+python scripts/notify.py --alarmer-key "<KEY>" --city oulu --category citizenship --date 2026-06-22
+```
+
 Multi-service category:
 
 ```bash
@@ -90,6 +97,22 @@ python scripts/notify.py --alarmer-key "<KEY>" --category residence-permit --ser
 ```
 
 You may use either `--week` or `--date`, but not both in the same command.
+
+## Cities
+
+If `--city` is omitted, the script checks Helsinki. Supported canonical cities are:
+
+- `helsinki`
+- `turku` (office in Raisio; `raisio` is also accepted)
+- `tampere`
+- `oulu`
+- `lahti`
+- `kuopio`
+- `lappeenranta`
+- `vaasa`
+- `rovaniemi`
+- `aland` (office in Mariehamn; `åland`, `ahvenanmaa`,
+  `ahvenanmaa-aland`, and `mariehamn` are also accepted)
 
 ## Categories and Services
 
@@ -125,10 +148,10 @@ Services:
 
 ## Cron Example
 
-Every 10 minutes, check today and tomorrow in Helsinki local dates, with no-slots messages:
+Every 10 minutes, check today and tomorrow in Oulu, with no-slots messages:
 
 ```cron
-*/10 * * * * ALARMER_KEY="YOUR_ALARMER_KEY" /home/vadim/.local/bin/poetry -C /home/vadim/migri-appointment run python scripts/notify.py --alarmer-key "$ALARMER_KEY" --category residence-permit --service permanent-residence-permit --date "$(date +\%F)" --date "$(date -d '+1 day' +\%F)" --send-no-slots >> /home/vadim/migri-appointment/notify.log 2>&1
+*/10 * * * * ALARMER_KEY="YOUR_ALARMER_KEY" /home/vadim/.local/bin/poetry -C /home/vadim/migri-appointment run python scripts/notify.py --alarmer-key "$ALARMER_KEY" --city oulu --category residence-permit --service permanent-residence-permit --date "$(date +\%F)" --date "$(date -d '+1 day' +\%F)" --send-no-slots >> /home/vadim/migri-appointment/notify.log 2>&1
 ```
 
 Note: `%` must be escaped as `\%` in crontab.

@@ -6,11 +6,14 @@ from datetime import datetime
 import requests
 
 from .errors import MigriApiError, UnsupportedOfficeError
+from .office_catalog import OFFICES_BY_CITY_SLUG, normalize_city_slug
 from .types import Resource, Slot
 
 DEFAULT_BASE_URL = "https://migri.vihta.com/public/migri/api"
 DEFAULT_SERVICE_SELECTION_ID = "3e03034d-a44b-4771-b1e5-2c4a6f581b7d"
-DEFAULT_OFFICE_MAP = {"helsinki": "438cd01e-9d81-40d9-b31d-5681c11bd974"}
+DEFAULT_OFFICE_MAP = {
+    city_slug: office.office_id for city_slug, office in OFFICES_BY_CITY_SLUG.items()
+}
 DEFAULT_REQUEST_HEADERS = {
     "User-Agent": "curl/8.0.0",
     "Accept": "*/*",
@@ -41,7 +44,7 @@ class MigriClient:
         if not 1 <= week <= 53:
             raise ValueError(f"week must be in range 1..53, got {week}")
 
-        office_key = office_name.strip().lower()
+        office_key = normalize_city_slug(office_name)
         office_id = self._office_map.get(office_key)
         if office_id is None:
             raise UnsupportedOfficeError(

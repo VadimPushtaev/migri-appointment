@@ -17,6 +17,7 @@ def disable_sleep(monkeypatch: pytest.MonkeyPatch):
 def make_fake_client_factory(
     mapping: dict[tuple[int, int], object],
     expected_service_selection_id: str | None = None,
+    expected_office_name: str = "helsinki",
 ):
     class FakeClient:
         def __init__(self, base_url: str, language: str, service_selection_id: str):
@@ -27,7 +28,7 @@ def make_fake_client_factory(
                 assert service_selection_id == expected_service_selection_id
 
         def get_slots(self, office_name: str, year: int, week: int):
-            assert office_name == "helsinki"
+            assert office_name == expected_office_name
             value = mapping[(year, week)]
             if isinstance(value, Exception):
                 raise value
@@ -149,12 +150,49 @@ def test_main_sends_when_slots_exist(monkeypatch: pytest.MonkeyPatch):
     assert len(sent_messages) == 1
     key, text = sent_messages[0]
     assert key == "abc-key"
-    assert "Migri slots available" in text
+    assert "Migri slots available in Helsinki" in text
     assert "2026:w26" in text
     assert "2026-06-22 05:15 UTC" in text
     assert "2026-06-22 06:15 UTC" in text
     assert text.index("2026-06-22 05:15 UTC") < text.index("2026-06-22 06:15 UTC")
     assert f"Open Migri: {notify.MIGRI_LINK}" in text
+
+
+def test_main_uses_explicit_city_in_fetch_message_and_log(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    monkeypatch.setattr(
+        notify,
+        "MigriClient",
+        make_fake_client_factory(
+            mapping={(2026, 26): [sample_slot()]},
+            expected_service_selection_id="000564ce-b800-4c2e-8040-62f50a09f55e",
+            expected_office_name="oulu",
+        ),
+    )
+    sent_messages: list[str] = []
+    monkeypatch.setattr(
+        notify,
+        "send_alarmer_message",
+        lambda key, text, timeout_seconds=10.0: sent_messages.append(text) or True,
+    )
+
+    rc = notify.main(
+        [
+            "--alarmer-key",
+            "abc-key",
+            "--city",
+            "OULU",
+            "--category",
+            "citizenship",
+            "--week",
+            "2026:26",
+        ]
+    )
+
+    assert rc == 0
+    assert "Migri slots available in Oulu:" in sent_messages[0]
+    assert "Fetched Oulu 2026:w26: 1 slot(s)" in capsys.readouterr().out
 
 
 def test_slots_message_caps_large_date_result():
@@ -261,7 +299,7 @@ def test_main_sends_no_slots_message_when_flag_set(monkeypatch: pytest.MonkeyPat
 
     assert rc == 0
     assert len(sent_messages) == 1
-    assert "No slots found" in sent_messages[0]
+    assert "No slots found in Helsinki" in sent_messages[0]
     assert "2026:w21" in sent_messages[0]
     assert "2026:w22" in sent_messages[0]
     assert f"Open Migri: {notify.MIGRI_LINK}" in sent_messages[0]
@@ -352,6 +390,7 @@ def test_main_all_failed_returns_one(monkeypatch: pytest.MonkeyPatch):
     assert rc == 1
     assert len(sent_messages) == 1
     assert "failed for all requested weeks" in sent_messages[0]
+    assert "weeks in Helsinki" in sent_messages[0]
     assert f"Open Migri: {notify.MIGRI_LINK}" in sent_messages[0]
 
 
@@ -611,7 +650,7 @@ def test_main_date_mode_sends_no_slots_message_when_flag_set(monkeypatch: pytest
     assert rc == 0
     assert len(sent_messages) == 1
     text = sent_messages[0]
-    assert "No slots found for: 2026-06-22, 2026-06-23" in text
+    assert "No slots found in Helsinki for: 2026-06-22, 2026-06-23" in text
     assert "Failed dates:" not in text
     assert "2026:w26" not in text
 
@@ -802,3 +841,23 @@ def test_main_rejects_invalid_category(capsys: pytest.CaptureFixture[str]):
     assert exc_info.value.code == 2
     captured = capsys.readouterr()
     assert "invalid choice: 'unknown-category'" in captured.err
+
+
+def test_main_rejects_invalid_city(capsys: pytest.CaptureFixture[str]):
+    with pytest.raises(SystemExit) as exc_info:
+        notify.main(
+            [
+                "--alarmer-key",
+                "abc-key",
+                "--city",
+                "espoo",
+                "--category",
+                "citizenship",
+                "--week",
+                "2026:26",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "invalid choice: 'espoo'" in captured.err
