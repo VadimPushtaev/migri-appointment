@@ -21,7 +21,8 @@ Telegram notifications via AlarmerBot.
 - Large slot messages are capped to the earliest 20 slot timestamps by default
   to fit AlarmerBot URL limits.
 - Timestamped logs with Alarmer request URL + response for debugging.
-- A global 2 second delay between city/week fetches to reduce request bursts.
+- Client-owned Migri API limits: one HTTP query every 2 seconds, at most 10
+  queries in any 60-second window, and at most one query in flight.
 
 ## Requirements
 
@@ -67,11 +68,20 @@ python scripts/notify.py --alarmer-key "<KEY>" --city oulu --category citizenshi
 ```
 
 Repeat `--city` to check multiple cities in one process. All city/week fetches are
-serialized and share the same two-second delay:
+serialized and share the `MigriClient` HTTP query limiter:
 
 ```bash
 python scripts/notify.py --alarmer-key "<KEY>" --city helsinki --city tampere --city lahti --category citizenship --date 2027-05-16..2027-07-01
 ```
+
+Each city/week fetch makes two Migri HTTP queries: one to create a session and
+one to fetch the schedule. `MigriClient` decorates both query methods and uses a
+process-wide limiter shared by default across client instances. The limiter
+enforces:
+
+- at least 2 seconds between query start times
+- no more than 10 query starts in a rolling 60-second window
+- no more than one in-flight query at a time
 
 Multi-service category:
 
@@ -175,7 +185,6 @@ The script logs:
 
 - fetch result per week with timestamps
 - date-mode notifications are filtered by Helsinki local calendar date
-- sleep intervals between requests
 - exact Alarmer request URL
 - Alarmer response status + body
 
@@ -185,7 +194,7 @@ This is helpful when debugging delivery issues.
 
 - If Migri returns `403`/WAF-style responses, retry later and keep request pace
   conservative.
-- Keep fetch intervals moderate (the script already sleeps 2s between weeks).
+- Migri queries are automatically paced by `MigriClient`.
 - Verify Alarmer key and inspect logged response body for delivery errors.
 
 ## Tests

@@ -9,11 +9,6 @@ from migri_appointment.types import Resource, Slot
 from scripts import notify
 
 
-@pytest.fixture(autouse=True)
-def disable_sleep(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(notify.time, "sleep", lambda _: None)
-
-
 def make_fake_client_factory(
     mapping: dict[tuple[int, int], object],
     expected_service_selection_id: str | None = None,
@@ -477,42 +472,7 @@ def test_send_alarmer_message_truncates_oversized_message(monkeypatch: pytest.Mo
     assert f"Open Migri: {notify.MIGRI_LINK}" in message
 
 
-def test_main_waits_between_week_fetches(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        notify,
-        "MigriClient",
-        make_fake_client_factory(
-            mapping={
-                (2026, 21): [],
-                (2026, 22): [],
-            },
-            expected_service_selection_id="3e03034d-a44b-4771-b1e5-2c4a6f581b7d",
-        ),
-    )
-    monkeypatch.setattr(notify, "send_alarmer_message", lambda *args, **kwargs: True)
-
-    sleep_calls: list[float] = []
-    monkeypatch.setattr(notify.time, "sleep", lambda seconds: sleep_calls.append(seconds))
-
-    rc = notify.main(
-        [
-            "--alarmer-key",
-            "abc-key",
-            "--category",
-            "residence-permit",
-            "--service",
-            "permanent-residence-permit",
-            "--week",
-            "2026:21..2026:22",
-            "--send-no-slots",
-        ]
-    )
-
-    assert rc == 0
-    assert sleep_calls == [notify.FETCH_DELAY_SECONDS]
-
-
-def test_main_rate_limits_multiple_cities_in_one_fetch_stream(
+def test_main_serializes_multiple_cities_in_one_fetch_stream(
     monkeypatch: pytest.MonkeyPatch,
 ):
     fetches: list[tuple[str, int, int]] = []
@@ -527,8 +487,6 @@ def test_main_rate_limits_multiple_cities_in_one_fetch_stream(
 
     monkeypatch.setattr(notify, "MigriClient", FakeClient)
     monkeypatch.setattr(notify, "send_alarmer_message", lambda *args, **kwargs: True)
-    sleep_calls: list[float] = []
-    monkeypatch.setattr(notify.time, "sleep", lambda seconds: sleep_calls.append(seconds))
 
     rc = notify.main(
         [
@@ -556,7 +514,6 @@ def test_main_rate_limits_multiple_cities_in_one_fetch_stream(
         ("tampere", 2026, 22),
         ("lahti", 2026, 22),
     ]
-    assert sleep_calls == [notify.FETCH_DELAY_SECONDS] * 5
 
 
 def test_main_sends_separate_notifications_for_multiple_cities(

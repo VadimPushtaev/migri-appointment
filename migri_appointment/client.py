@@ -1,7 +1,13 @@
 from __future__ import annotations
 
-import json
+from collections import deque
+from collections.abc import Callable
 from datetime import datetime
+from functools import wraps
+import json
+import threading
+import time
+from typing import Any, TypeVar, cast
 
 import requests
 
@@ -18,6 +24,85 @@ DEFAULT_REQUEST_HEADERS = {
     "User-Agent": "curl/8.0.0",
     "Accept": "*/*",
 }
+DEFAULT_MIN_QUERY_INTERVAL_SECONDS = 2.0
+DEFAULT_MAX_QUERIES_PER_WINDOW = 10
+DEFAULT_QUERY_WINDOW_SECONDS = 60.0
+
+QueryResult = TypeVar("QueryResult")
+QueryMethod = TypeVar("QueryMethod", bound=Callable[..., object])
+
+
+class MigriQueryLimiter:
+    """Thread-safe, rolling-window limiter for Migri HTTP queries."""
+
+    def __init__(
+        self,
+        min_interval_seconds: float = DEFAULT_MIN_QUERY_INTERVAL_SECONDS,
+        max_queries_per_window: int = DEFAULT_MAX_QUERIES_PER_WINDOW,
+        window_seconds: float = DEFAULT_QUERY_WINDOW_SECONDS,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        if min_interval_seconds < 0:
+            raise ValueError("min_interval_seconds must not be negative")
+        if max_queries_per_window < 1:
+            raise ValueError("max_queries_per_window must be at least 1")
+        if window_seconds <= 0:
+            raise ValueError("window_seconds must be positive")
+
+        self._min_interval_seconds = min_interval_seconds
+        self._max_queries_per_window = max_queries_per_window
+        self._window_seconds = window_seconds
+        self._clock = clock
+        self._sleeper = sleeper
+        self._query_starts: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def run(self, query: Callable[[], QueryResult]) -> QueryResult:
+        # The lock is deliberately held while waiting and during the query. This
+        # makes the rolling-window state atomic and permits only one in-flight
+        # Migri HTTP request for this limiter.
+        with self._lock:
+            while True:
+                now = self._clock()
+                self._discard_expired_queries(now)
+
+                interval_wait = 0.0
+                if self._query_starts:
+                    interval_wait = (
+                        self._query_starts[-1] + self._min_interval_seconds - now
+                    )
+
+                window_wait = 0.0
+                if len(self._query_starts) >= self._max_queries_per_window:
+                    window_wait = self._query_starts[0] + self._window_seconds - now
+
+                wait_seconds = max(interval_wait, window_wait)
+                if wait_seconds <= 0:
+                    break
+                self._sleeper(wait_seconds)
+
+            self._query_starts.append(self._clock())
+            return query()
+
+    def _discard_expired_queries(self, now: float) -> None:
+        window_start = now - self._window_seconds
+        while self._query_starts and self._query_starts[0] <= window_start:
+            self._query_starts.popleft()
+
+
+DEFAULT_QUERY_LIMITER = MigriQueryLimiter()
+
+
+def migri_query(method: QueryMethod) -> QueryMethod:
+    """Apply the client's shared Migri query limits to an HTTP method."""
+
+    @wraps(method)
+    def wrapped(self: MigriClient, *args: Any, **kwargs: Any) -> object:
+        return self._query_limiter.run(lambda: method(self, *args, **kwargs))
+
+    return cast(QueryMethod, wrapped)
 
 
 class MigriClient:
@@ -29,12 +114,16 @@ class MigriClient:
         service_selection_id: str = DEFAULT_SERVICE_SELECTION_ID,
         timeout_seconds: float = 15.0,
         default_headers: dict[str, str] | None = None,
+        query_limiter: MigriQueryLimiter | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._language = language
         self._office_map = office_map or DEFAULT_OFFICE_MAP
         self._service_selection_id = service_selection_id
         self._timeout_seconds = timeout_seconds
+        self._query_limiter = (
+            query_limiter if query_limiter is not None else DEFAULT_QUERY_LIMITER
+        )
         self._http = requests.Session()
         self._http.headers.update(DEFAULT_REQUEST_HEADERS)
         if default_headers:
@@ -55,6 +144,7 @@ class MigriClient:
         payload = self._fetch_week(office_id=office_id, year=year, week=week, session_id=session_id)
         return self._parse_slots(payload)
 
+    @migri_query
     def _create_session(self) -> str:
         url = f"{self._base_url}/sessions"
         response = self._http.get(url, timeout=self._timeout_seconds)
@@ -67,6 +157,7 @@ class MigriClient:
             raise MigriApiError("session response missing string field 'id'")
         return session_id
 
+    @migri_query
     def _fetch_week(self, office_id: str, year: int, week: int, session_id: str) -> dict:
         url = f"{self._base_url}/scheduling/offices/{office_id}/{year}/w{week}"
         response = self._http.post(

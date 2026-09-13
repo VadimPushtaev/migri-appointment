@@ -4,7 +4,6 @@ import argparse
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import sys
-import time
 from typing import Callable, Iterable, Sequence
 from zoneinfo import ZoneInfo
 
@@ -26,7 +25,6 @@ from migri_appointment.types import Slot
 
 ALARMBOT_URL = "https://alarmerbot.getmy.dev/"
 MIGRI_LINK = "https://migri.vihta.com/"
-FETCH_DELAY_SECONDS = 2.0
 DEFAULT_MAX_NOTIFICATION_SLOTS = 20
 MAX_ALARMER_MESSAGE_CHARS = 1800
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
@@ -496,14 +494,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     requested_date_set = set(requested_dates or [])
 
-    fetch_index = 0
     for year, week in weeks:
         for office in selected_offices:
-            if fetch_index > 0:
-                log(f"Sleeping {FETCH_DELAY_SECONDS:.1f}s before next fetch...")
-                time.sleep(FETCH_DELAY_SECONDS)
-            fetch_index += 1
-
             try:
                 slots = client.get_slots(office.slug, year, week)
             except Exception as exc:

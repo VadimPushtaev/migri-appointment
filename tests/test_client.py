@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import threading
 
 import pytest
 
-from migri_appointment.client import DEFAULT_REQUEST_HEADERS, MigriClient
+from migri_appointment.client import (
+    DEFAULT_QUERY_LIMITER,
+    DEFAULT_REQUEST_HEADERS,
+    MigriClient,
+    MigriQueryLimiter,
+)
 from migri_appointment.errors import MigriApiError, UnsupportedOfficeError
 
 
@@ -64,13 +70,123 @@ class FakeSession:
         return self._responses.pop(0)
 
 
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 def make_client(
-    monkeypatch: pytest.MonkeyPatch, responses: list[FakeResponse]
+    monkeypatch: pytest.MonkeyPatch,
+    responses: list[FakeResponse],
+    clock: FakeClock | None = None,
 ) -> tuple[FakeSession, MigriClient]:
     fake_session = FakeSession(responses)
     monkeypatch.setattr("migri_appointment.client.requests.Session", lambda: fake_session)
-    client = MigriClient()
+    fake_clock = clock or FakeClock()
+    client = MigriClient(
+        query_limiter=MigriQueryLimiter(
+            clock=fake_clock.monotonic,
+            sleeper=fake_clock.sleep,
+        )
+    )
     return fake_session, client
+
+
+def test_query_limiter_enforces_interval_and_rolling_window():
+    clock = FakeClock()
+    limiter = MigriQueryLimiter(clock=clock.monotonic, sleeper=clock.sleep)
+    query_starts: list[float] = []
+
+    for _ in range(11):
+        limiter.run(lambda: query_starts.append(clock.monotonic()))
+
+    assert query_starts == [
+        0.0,
+        2.0,
+        4.0,
+        6.0,
+        8.0,
+        10.0,
+        12.0,
+        14.0,
+        16.0,
+        18.0,
+        60.0,
+    ]
+    assert clock.sleeps == [2.0] * 9 + [42.0]
+
+
+def test_query_limiter_allows_only_one_parallel_query():
+    limiter = MigriQueryLimiter(
+        min_interval_seconds=0,
+        max_queries_per_window=100,
+    )
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_attempted = threading.Event()
+    second_started = threading.Event()
+
+    def first_query() -> None:
+        first_started.set()
+        assert release_first.wait(timeout=1)
+
+    def run_second_query() -> None:
+        second_attempted.set()
+        limiter.run(second_started.set)
+
+    first_thread = threading.Thread(target=lambda: limiter.run(first_query))
+    first_thread.start()
+    assert first_started.wait(timeout=1)
+
+    second_thread = threading.Thread(target=run_second_query)
+    second_thread.start()
+    assert second_attempted.wait(timeout=1)
+    assert not second_started.wait(timeout=0.05)
+
+    release_first.set()
+    first_thread.join(timeout=1)
+    second_thread.join(timeout=1)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert second_started.is_set()
+
+
+def test_get_slots_rate_limits_both_http_methods(monkeypatch: pytest.MonkeyPatch):
+    clock = FakeClock()
+    _, client = make_client(
+        monkeypatch,
+        responses=[
+            FakeResponse(200, {"id": "session-123"}),
+            FakeResponse(200, {"resources": [], "dailyTimesByOffice": []}),
+        ],
+        clock=clock,
+    )
+
+    client.get_slots("helsinki", 2026, 21)
+
+    assert clock.sleeps == [2.0]
+
+
+def test_clients_share_the_default_process_limiter(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        "migri_appointment.client.requests.Session",
+        lambda: FakeSession([]),
+    )
+
+    first_client = MigriClient()
+    second_client = MigriClient()
+
+    assert first_client._query_limiter is DEFAULT_QUERY_LIMITER
+    assert second_client._query_limiter is DEFAULT_QUERY_LIMITER
 
 
 def test_get_slots_returns_detailed_slots(monkeypatch: pytest.MonkeyPatch):
