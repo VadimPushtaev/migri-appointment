@@ -75,6 +75,14 @@ def test_parse_date_selector_range():
     ]
 
 
+def test_resolve_city_slugs_defaults_and_deduplicates_aliases():
+    assert notify.resolve_city_slugs(None) == ["helsinki"]
+    assert notify.resolve_city_slugs(["turku", "raisio", "lahti", "lahti"]) == [
+        "turku",
+        "lahti",
+    ]
+
+
 @pytest.mark.parametrize(
     "raw_value",
     [
@@ -502,6 +510,96 @@ def test_main_waits_between_week_fetches(monkeypatch: pytest.MonkeyPatch):
 
     assert rc == 0
     assert sleep_calls == [notify.FETCH_DELAY_SECONDS]
+
+
+def test_main_rate_limits_multiple_cities_in_one_fetch_stream(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fetches: list[tuple[str, int, int]] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, language: str, service_selection_id: str):
+            pass
+
+        def get_slots(self, office_name: str, year: int, week: int):
+            fetches.append((office_name, year, week))
+            return []
+
+    monkeypatch.setattr(notify, "MigriClient", FakeClient)
+    monkeypatch.setattr(notify, "send_alarmer_message", lambda *args, **kwargs: True)
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(notify.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    rc = notify.main(
+        [
+            "--alarmer-key",
+            "abc-key",
+            "--city",
+            "helsinki",
+            "--city",
+            "tampere",
+            "--city",
+            "lahti",
+            "--category",
+            "citizenship",
+            "--week",
+            "2026:21..2026:22",
+        ]
+    )
+
+    assert rc == 0
+    assert fetches == [
+        ("helsinki", 2026, 21),
+        ("tampere", 2026, 21),
+        ("lahti", 2026, 21),
+        ("helsinki", 2026, 22),
+        ("tampere", 2026, 22),
+        ("lahti", 2026, 22),
+    ]
+    assert sleep_calls == [notify.FETCH_DELAY_SECONDS] * 5
+
+
+def test_main_sends_separate_notifications_for_multiple_cities(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeClient:
+        def __init__(self, base_url: str, language: str, service_selection_id: str):
+            pass
+
+        def get_slots(self, office_name: str, year: int, week: int):
+            assert (year, week) == (2026, 26)
+            return {
+                "helsinki": [slot_at(2026, 6, 22, 5, 15)],
+                "tampere": [slot_at(2026, 6, 22, 6, 15)],
+            }[office_name]
+
+    monkeypatch.setattr(notify, "MigriClient", FakeClient)
+    sent_messages: list[str] = []
+    monkeypatch.setattr(
+        notify,
+        "send_alarmer_message",
+        lambda key, text, timeout_seconds=10.0: sent_messages.append(text) or True,
+    )
+
+    rc = notify.main(
+        [
+            "--alarmer-key",
+            "abc-key",
+            "--city",
+            "helsinki",
+            "--city",
+            "tampere",
+            "--category",
+            "citizenship",
+            "--week",
+            "2026:26",
+        ]
+    )
+
+    assert rc == 0
+    assert len(sent_messages) == 2
+    assert "Migri slots available in Helsinki:" in sent_messages[0]
+    assert "Migri slots available in Tampere:" in sent_messages[1]
 
 
 def test_main_rejects_missing_week_and_date(capsys: pytest.CaptureFixture[str]):

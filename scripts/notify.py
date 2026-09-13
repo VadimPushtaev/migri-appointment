@@ -349,6 +349,19 @@ def category_slugs() -> list[str]:
     return [category.slug for category in SERVICE_CATEGORIES]
 
 
+def resolve_city_slugs(city_slugs: Sequence[str] | None) -> list[str]:
+    requested_slugs = city_slugs or [DEFAULT_CITY_SLUG]
+    result: list[str] = []
+    seen: set[str] = set()
+    for city_slug in requested_slugs:
+        canonical_slug = OFFICES_BY_CITY_SLUG[city_slug].slug
+        if canonical_slug in seen:
+            continue
+        seen.add(canonical_slug)
+        result.append(canonical_slug)
+    return result
+
+
 def resolve_service_selection(
     parser: argparse.ArgumentParser, category_slug: str, service_slug: str | None
 ) -> ServiceOption:
@@ -384,10 +397,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--alarmer-key", required=True, help="AlarmerBot key.")
     parser.add_argument(
         "--city",
+        dest="cities",
+        action="append",
         type=normalize_city_slug,
         choices=CITY_SLUGS,
-        default=DEFAULT_CITY_SLUG,
-        help=f"Migri office city (default: {DEFAULT_CITY_SLUG}).",
+        help=(
+            "Migri office city. Repeat to check multiple cities in one rate-limited "
+            f"process (default: {DEFAULT_CITY_SLUG})."
+        ),
     )
     parser.add_argument(
         "--category",
@@ -447,8 +464,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.max_notification_slots < 1:
         parser.error("--max-notification-slots must be at least 1")
 
-    selected_office = OFFICES_BY_CITY_SLUG[args.city]
-    city_label = selected_office.display_name
+    city_slugs = resolve_city_slugs(args.cities)
+    selected_offices = [OFFICES_BY_CITY_SLUG[city_slug] for city_slug in city_slugs]
     selected_service = resolve_service_selection(parser, args.category, args.service)
     has_weeks = bool(args.weeks)
     has_dates = bool(args.dates)
@@ -468,106 +485,132 @@ def main(argv: Sequence[str] | None = None) -> int:
         service_selection_id=selected_service.service_selection_id,
     )
 
-    available_by_week: dict[tuple[int, int], list[Slot]] = {}
-    available_by_date: dict[date, list[Slot]] = {}
-    failures: list[tuple[int, int, str]] = []
+    available_by_week: dict[str, dict[tuple[int, int], list[Slot]]] = {
+        office.slug: {} for office in selected_offices
+    }
+    available_by_date: dict[str, dict[date, list[Slot]]] = {
+        office.slug: {} for office in selected_offices
+    }
+    failures: dict[str, list[tuple[int, int, str]]] = {
+        office.slug: [] for office in selected_offices
+    }
     requested_date_set = set(requested_dates or [])
 
-    for index, (year, week) in enumerate(weeks):
-        if index > 0:
-            log(f"Sleeping {FETCH_DELAY_SECONDS:.1f}s before next week fetch...")
-            time.sleep(FETCH_DELAY_SECONDS)
+    fetch_index = 0
+    for year, week in weeks:
+        for office in selected_offices:
+            if fetch_index > 0:
+                log(f"Sleeping {FETCH_DELAY_SECONDS:.1f}s before next fetch...")
+                time.sleep(FETCH_DELAY_SECONDS)
+            fetch_index += 1
 
-        try:
-            slots = client.get_slots(args.city, year, week)
-        except Exception as exc:
-            failures.append((year, week, str(exc)))
-            log(f"Failed to fetch {city_label} {format_week(year, week)}: {exc}")
-            continue
+            try:
+                slots = client.get_slots(office.slug, year, week)
+            except Exception as exc:
+                failures[office.slug].append((year, week, str(exc)))
+                log(f"Failed to fetch {office.display_name} {format_week(year, week)}: {exc}")
+                continue
 
-        log(f"Fetched {city_label} {format_week(year, week)}: {len(slots)} slot(s)")
-        if has_weeks:
-            if slots:
-                available_by_week[(year, week)] = slots
-            continue
+            log(f"Fetched {office.display_name} {format_week(year, week)}: {len(slots)} slot(s)")
+            if has_weeks:
+                if slots:
+                    available_by_week[office.slug][(year, week)] = slots
+                continue
 
-        filtered_slots = filter_slots_for_dates(slots, requested_date_set)
-        for slot in filtered_slots:
-            selected_date = slot_local_date(slot)
-            available_by_date.setdefault(selected_date, []).append(slot)
+            filtered_slots = filter_slots_for_dates(slots, requested_date_set)
+            for slot in filtered_slots:
+                selected_date = slot_local_date(slot)
+                available_by_date[office.slug].setdefault(selected_date, []).append(slot)
 
-    if len(failures) == len(weeks):
-        if has_weeks:
-            message = build_all_failed_message_by_week(failures, city_label=city_label)
+    had_all_fetches_fail = False
+    had_notification_failure = False
+
+    for office in selected_offices:
+        city_failures = failures[office.slug]
+        if len(city_failures) == len(weeks):
+            had_all_fetches_fail = True
+            if has_weeks:
+                message = build_all_failed_message_by_week(
+                    city_failures, city_label=office.display_name
+                )
+            else:
+                failed_dates = failed_dates_from_week_failures(
+                    requested_dates or [], city_failures
+                )
+                message = build_all_failed_message_by_date(
+                    failed_dates, city_label=office.display_name
+                )
         else:
-            failed_dates = failed_dates_from_week_failures(requested_dates or [], failures)
-            message = build_all_failed_message_by_date(failed_dates, city_label=city_label)
+            if has_weeks:
+                available = available_by_week[office.slug]
+            else:
+                city_available_by_date = available_by_date[office.slug]
+                available = {
+                    requested_date: city_available_by_date[requested_date]
+                    for requested_date in requested_dates or []
+                    if requested_date in city_available_by_date
+                }
+
+            if not available and not args.send_no_slots:
+                log(
+                    f"No slots found in {office.display_name}; notification skipped "
+                    "(use --send-no-slots to enable)."
+                )
+                continue
+
+            if has_weeks:
+                if available:
+                    message = build_slots_message_by_week(
+                        available=available,
+                        failures=city_failures,
+                        max_slots=args.max_notification_slots,
+                        city_label=office.display_name,
+                    )
+                else:
+                    message = build_no_slots_message_by_week(
+                        weeks=weeks,
+                        failures=city_failures,
+                        city_label=office.display_name,
+                    )
+            else:
+                failed_dates = failed_dates_from_week_failures(
+                    requested_dates or [], city_failures
+                )
+                if available:
+                    message = build_slots_message_by_date(
+                        available=available,
+                        failures=failed_dates,
+                        max_slots=args.max_notification_slots,
+                        city_label=office.display_name,
+                    )
+                else:
+                    message = build_no_slots_message_by_date(
+                        dates=requested_dates or [],
+                        failures=failed_dates,
+                        city_label=office.display_name,
+                    )
+
         try:
             sent = send_alarmer_message(args.alarmer_key, message)
         except requests.RequestException as exc:
-            log(f"Notification failed: {exc}")
-            return 2
+            log(f"Notification for {office.display_name} failed: {exc}")
+            had_notification_failure = True
+            continue
+
         if not sent:
-            log("Notification failed: non-2xx response from AlarmerBot")
-            return 2
+            log(
+                f"Notification for {office.display_name} failed: "
+                "non-2xx response from AlarmerBot"
+            )
+            had_notification_failure = True
+            continue
+
+        log(f"Notification for {office.display_name} sent.")
+
+    if had_notification_failure:
+        return 2
+    if had_all_fetches_fail:
         return 1
-
-    if has_weeks:
-        available = available_by_week
-        should_send = bool(available) or args.send_no_slots
-    else:
-        ordered_available_by_date = {
-            requested_date: available_by_date[requested_date]
-            for requested_date in requested_dates or []
-            if requested_date in available_by_date
-        }
-        available = ordered_available_by_date
-        should_send = bool(available) or args.send_no_slots
-
-    if not should_send:
-        log(
-            f"No slots found in {city_label}; notification skipped "
-            "(use --send-no-slots to enable)."
-        )
-        return 0
-
-    if has_weeks:
-        if available:
-            message = build_slots_message_by_week(
-                available=available,
-                failures=failures,
-                max_slots=args.max_notification_slots,
-                city_label=city_label,
-            )
-        else:
-            message = build_no_slots_message_by_week(
-                weeks=weeks, failures=failures, city_label=city_label
-            )
-    else:
-        failed_dates = failed_dates_from_week_failures(requested_dates or [], failures)
-        if available:
-            message = build_slots_message_by_date(
-                available=available,
-                failures=failed_dates,
-                max_slots=args.max_notification_slots,
-                city_label=city_label,
-            )
-        else:
-            message = build_no_slots_message_by_date(
-                dates=requested_dates or [], failures=failed_dates, city_label=city_label
-            )
-
-    try:
-        sent = send_alarmer_message(args.alarmer_key, message)
-    except requests.RequestException as exc:
-        log(f"Notification failed: {exc}")
-        return 2
-
-    if not sent:
-        log("Notification failed: non-2xx response from AlarmerBot")
-        return 2
-
-    log("Notification sent.")
     return 0
 
 

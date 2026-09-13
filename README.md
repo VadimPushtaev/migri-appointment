@@ -7,7 +7,7 @@ Telegram notifications via AlarmerBot.
 
 - Typed Migri API client (`migri_appointment`) for Migri office slots across Finland.
 - Notification CLI script (`scripts/notify.py`).
-- City selection via `--city`, defaulting to Helsinki.
+- Repeatable city selection via `--city`, defaulting to Helsinki.
 - Hardcoded Migri category/service selection via `--category` and `--service`.
 - Week selectors support both single week and ranges:
   - `2026:23`
@@ -21,7 +21,7 @@ Telegram notifications via AlarmerBot.
 - Large slot messages are capped to the earliest 20 slot timestamps by default
   to fit AlarmerBot URL limits.
 - Timestamped logs with Alarmer request URL + response for debugging.
-- 2 second delay between week fetches to reduce request burst.
+- A global 2 second delay between city/week fetches to reduce request bursts.
 
 ## Requirements
 
@@ -64,6 +64,13 @@ Choose a city (case-insensitive):
 
 ```bash
 python scripts/notify.py --alarmer-key "<KEY>" --city oulu --category citizenship --date 2026-06-22
+```
+
+Repeat `--city` to check multiple cities in one process. All city/week fetches are
+serialized and share the same two-second delay:
+
+```bash
+python scripts/notify.py --alarmer-key "<KEY>" --city helsinki --city tampere --city lahti --category citizenship --date 2027-05-16..2027-07-01
 ```
 
 Multi-service category:
@@ -155,6 +162,12 @@ Every 10 minutes, check today and tomorrow in Oulu, with no-slots messages:
 ```
 
 Note: `%` must be escaped as `\%` in crontab.
+
+Multiple cities can be checked with one cron process:
+
+```cron
+*/10 * * * * ALARMER_KEY="YOUR_ALARMER_KEY" /home/vadim/.local/bin/poetry -C /home/vadim/migri-appointment run python scripts/notify.py --alarmer-key "$ALARMER_KEY" --city helsinki --city tampere --city lahti --category citizenship --date "2027-05-16..2027-07-01" >> /home/vadim/migri-appointment/notify.log 2>&1
+```
 
 ## Output and Logging
 
