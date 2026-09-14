@@ -12,7 +12,11 @@ from migri_appointment.client import (
     MigriClient,
     MigriQueryLimiter,
 )
-from migri_appointment.errors import MigriApiError, UnsupportedOfficeError
+from migri_appointment.errors import (
+    MigriApiError,
+    MigriForbiddenError,
+    UnsupportedOfficeError,
+)
 
 
 class FakeResponse:
@@ -229,10 +233,15 @@ def test_get_slots_returns_detailed_slots(monkeypatch: pytest.MonkeyPatch):
     assert fake_session.calls[1]["headers"]["vihta-session"] == "session-123"
 
 
-def test_client_sets_curl_like_headers_by_default(monkeypatch: pytest.MonkeyPatch):
+def test_client_sets_browser_like_headers_by_default(monkeypatch: pytest.MonkeyPatch):
     fake_session, _ = make_client(monkeypatch, responses=[])
     for key, value in DEFAULT_REQUEST_HEADERS.items():
         assert fake_session.headers.get(key) == value
+
+    user_agent = fake_session.headers["User-Agent"]
+    assert user_agent.startswith("Mozilla/5.0")
+    assert "Chrome/" in user_agent
+    assert user_agent.endswith("Safari/537.36")
 
 
 def test_get_slots_empty_week_returns_empty_list(monkeypatch: pytest.MonkeyPatch):
@@ -246,6 +255,24 @@ def test_get_slots_empty_week_returns_empty_list(monkeypatch: pytest.MonkeyPatch
 
     slots = client.get_slots("helsinki", 2026, 21)
     assert slots == []
+
+
+def test_get_slots_reuses_session_between_week_queries(monkeypatch: pytest.MonkeyPatch):
+    fake_session, client = make_client(
+        monkeypatch,
+        responses=[
+            FakeResponse(200, {"id": "session-123"}),
+            FakeResponse(200, {"resources": [], "dailyTimesByOffice": []}),
+            FakeResponse(200, {"resources": [], "dailyTimesByOffice": []}),
+        ],
+    )
+
+    client.get_slots("helsinki", 2026, 21)
+    client.get_slots("helsinki", 2026, 22)
+
+    assert [call["method"] for call in fake_session.calls] == ["GET", "POST", "POST"]
+    assert fake_session.calls[1]["headers"]["vihta-session"] == "session-123"
+    assert fake_session.calls[2]["headers"]["vihta-session"] == "session-123"
 
 
 @pytest.mark.parametrize(
@@ -322,6 +349,22 @@ def test_non_200_from_scheduling_raises_migri_api_error(monkeypatch: pytest.Monk
         ],
     )
     with pytest.raises(MigriApiError, match="scheduling request failed with status 503"):
+        client.get_slots("helsinki", 2026, 26)
+
+
+@pytest.mark.parametrize("failed_request", ["session", "scheduling"])
+def test_403_raises_migri_forbidden_error(
+    monkeypatch: pytest.MonkeyPatch, failed_request: str
+):
+    forbidden = FakeResponse(403, {"error": "forbidden"})
+    responses = (
+        [forbidden]
+        if failed_request == "session"
+        else [FakeResponse(200, {"id": "session-123"}), forbidden]
+    )
+    _, client = make_client(monkeypatch, responses=responses)
+
+    with pytest.raises(MigriForbiddenError, match="failed with status 403"):
         client.get_slots("helsinki", 2026, 26)
 
 

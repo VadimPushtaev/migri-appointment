@@ -23,6 +23,8 @@ Telegram notifications via AlarmerBot.
 - Timestamped logs with Alarmer request URL + response for debugging.
 - Client-owned Migri API limits: one HTTP query every 2 seconds, at most 10
   queries in any 60-second window, and at most one query in flight.
+- One Migri API session is shared by all city/week fetches in a process.
+- A Migri `403` stops the run immediately so blocked clients do not keep querying.
 
 ## Requirements
 
@@ -74,10 +76,10 @@ serialized and share the `MigriClient` HTTP query limiter:
 python scripts/notify.py --alarmer-key "<KEY>" --city helsinki --city tampere --city lahti --category citizenship --date 2027-05-16..2027-07-01
 ```
 
-Each city/week fetch makes two Migri HTTP queries: one to create a session and
-one to fetch the schedule. `MigriClient` decorates both query methods and uses a
-process-wide limiter shared by default across client instances. The limiter
-enforces:
+`MigriClient` creates one Migri API session lazily and shares it across all
+city/week fetches made by that client. After that initial session query, each
+city/week fetch makes one scheduling query. Both query methods use a
+process-wide limiter shared by default across client instances. The limiter enforces:
 
 - at least 2 seconds between query start times
 - no more than 10 query starts in a rolling 60-second window
@@ -192,8 +194,8 @@ This is helpful when debugging delivery issues.
 
 ## Troubleshooting
 
-- If Migri returns `403`/WAF-style responses, retry later and keep request pace
-  conservative.
+- If Migri returns a `403`/WAF-style response, the run stops immediately. Retry
+  later and keep request pace conservative.
 - Migri queries are automatically paced by `MigriClient`.
 - Verify Alarmer key and inspect logged response body for delivery errors.
 

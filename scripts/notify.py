@@ -14,6 +14,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from migri_appointment.client import DEFAULT_BASE_URL, MigriClient
+from migri_appointment.errors import MigriForbiddenError
 from migri_appointment.office_catalog import (
     CITY_SLUGS,
     DEFAULT_CITY_SLUG,
@@ -498,6 +499,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         for office in selected_offices:
             try:
                 slots = client.get_slots(office.slug, year, week)
+            except MigriForbiddenError as exc:
+                log(
+                    f"Migri returned 403 while fetching {office.display_name} "
+                    f"{format_week(year, week)}; stopping immediately: {exc}"
+                )
+                return 1
             except Exception as exc:
                 failures[office.slug].append((year, week, str(exc)))
                 log(f"Failed to fetch {office.display_name} {format_week(year, week)}: {exc}")

@@ -11,7 +11,7 @@ from typing import Any, TypeVar, cast
 
 import requests
 
-from .errors import MigriApiError, UnsupportedOfficeError
+from .errors import MigriApiError, MigriForbiddenError, UnsupportedOfficeError
 from .office_catalog import OFFICES_BY_CITY_SLUG, normalize_city_slug
 from .types import Resource, Slot
 
@@ -21,7 +21,11 @@ DEFAULT_OFFICE_MAP = {
     city_slug: office.office_id for city_slug, office in OFFICES_BY_CITY_SLUG.items()
 }
 DEFAULT_REQUEST_HEADERS = {
-    "User-Agent": "curl/8.0.0",
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/151.0.0.0 Safari/537.36"
+    ),
     "Accept": "*/*",
 }
 DEFAULT_MIN_QUERY_INTERVAL_SECONDS = 2.0
@@ -124,6 +128,8 @@ class MigriClient:
         self._query_limiter = (
             query_limiter if query_limiter is not None else DEFAULT_QUERY_LIMITER
         )
+        self._session_id: str | None = None
+        self._session_lock = threading.Lock()
         self._http = requests.Session()
         self._http.headers.update(DEFAULT_REQUEST_HEADERS)
         if default_headers:
@@ -140,9 +146,15 @@ class MigriClient:
                 f"unsupported office '{office_name}', supported: {sorted(self._office_map)}"
             )
 
-        session_id = self._create_session()
+        session_id = self._get_session_id()
         payload = self._fetch_week(office_id=office_id, year=year, week=week, session_id=session_id)
         return self._parse_slots(payload)
+
+    def _get_session_id(self) -> str:
+        with self._session_lock:
+            if self._session_id is None:
+                self._session_id = self._create_session()
+            return self._session_id
 
     @migri_query
     def _create_session(self) -> str:
@@ -178,9 +190,13 @@ class MigriClient:
         status_code = getattr(response, "status_code", "unknown")
         url = getattr(response, "url", "<unknown>")
         body_excerpt = self._response_excerpt(response)
-        raise MigriApiError(
-            f"{context} failed with status {status_code} for {url}; response body: {body_excerpt}"
+        message = (
+            f"{context} failed with status {status_code} for {url}; "
+            f"response body: {body_excerpt}"
         )
+        if status_code == 403:
+            raise MigriForbiddenError(message)
+        raise MigriApiError(message)
 
     def _response_excerpt(self, response: requests.Response, max_len: int = 500) -> str:
         text_value = getattr(response, "text", None)

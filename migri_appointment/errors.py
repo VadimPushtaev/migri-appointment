@@ -8,3 +8,7 @@ class UnsupportedOfficeError(MigriError):
 
 class MigriApiError(MigriError):
     """Raised for unexpected API responses."""
+
+
+class MigriForbiddenError(MigriApiError):
+    """Raised when Migri rejects a request with HTTP 403."""

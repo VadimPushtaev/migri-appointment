@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+from migri_appointment.errors import MigriForbiddenError
 from migri_appointment.types import Resource, Slot
 from scripts import notify
 
@@ -352,6 +353,48 @@ def test_main_includes_partial_failures(monkeypatch: pytest.MonkeyPatch):
     text = sent_messages[0]
     assert "2026:w27" in text
     assert "Failed weeks: 2026:w26" in text
+
+
+def test_main_stops_immediately_on_first_403(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    fetches: list[tuple[str, int, int]] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, language: str, service_selection_id: str):
+            pass
+
+        def get_slots(self, office_name: str, year: int, week: int):
+            fetches.append((office_name, year, week))
+            raise MigriForbiddenError("session request failed with status 403")
+
+    monkeypatch.setattr(notify, "MigriClient", FakeClient)
+    send_calls: list[str] = []
+    monkeypatch.setattr(
+        notify,
+        "send_alarmer_message",
+        lambda key, text, timeout_seconds=10.0: send_calls.append(text) or True,
+    )
+
+    rc = notify.main(
+        [
+            "--alarmer-key",
+            "abc-key",
+            "--city",
+            "helsinki",
+            "--city",
+            "tampere",
+            "--category",
+            "citizenship",
+            "--week",
+            "2026:21..2026:22",
+        ]
+    )
+
+    assert rc == 1
+    assert fetches == [("helsinki", 2026, 21)]
+    assert send_calls == []
+    assert "Migri returned 403" in capsys.readouterr().out
 
 
 def test_main_all_failed_returns_one(monkeypatch: pytest.MonkeyPatch):
