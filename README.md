@@ -204,3 +204,39 @@ This is helpful when debugging delivery issues.
 ```bash
 poetry run pytest -q
 ```
+
+## Browser-based latest-date monitor
+
+`python scripts/notify_latest.py` launches Codex to use the repository skill
+`.agents/skills/check-migri-latest`. It checks the latest available appointment
+through the visible website and alerts on every run whose Helsinki calendar date
+is strictly after `--after`. Failures produce a separate alert and nonzero exit.
+
+```bash
+export ALARMER_KEY="YOUR_KEY"
+poetry run python scripts/notify_latest.py --browser-skill ~/.codex/skills/shared-browser/SKILL.md --people 2 --category citizenship --city helsinki --after 2027-05-01
+```
+
+The external shared-browser skill is required and is not bundled or modified.
+Install/authenticate Codex beforehand and provide a desktop session with Chrome
+and an existing Playwright installation. Use `--playwright-module` if needed.
+Codex uses automatic approval review; rejected browser access is a failed check.
+Use `--no-notify` for a live check without Telegram delivery.
+
+Run `--help` for model/profile, browser profile, runtime directory, timeout,
+family-members, service, and click-delay options. Defaults are a 600-second
+limit and random 3–6-second click delays. A dedicated persistent browser is left
+open and reused; the skill verifies filters and refreshes availability each run.
+Runtime/controller files and per-run Codex logs are stored under
+`~/.cache/migri-appointment/browser-monitor`; remove old run directories manually
+as needed. A profile lock prevents overlapping checks. No appointment is booked.
+
+Example hourly cron command (supply ALARMER_KEY and desktop environment through
+your local configuration; no cron job is installed automatically):
+
+```cron
+0 * * * * /home/vadim/.local/bin/poetry -C /home/vadim/migri-appointment run python scripts/notify_latest.py --browser-skill /home/vadim/.codex/skills/shared-browser/SKILL.md --after 2027-05-01 >> /home/vadim/migri-appointment/notify.log 2>&1
+```
+
+Exit codes: 0 successful check or overlapping run skipped; 1 check failed;
+2 notification failed. The earlier API-based `scripts/notify.py` is unchanged.

@@ -1,0 +1,55 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "available",
+        "no_availability",
+        "error"
+      ]
+    },
+    "city": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string"
+    },
+    "service": {
+      "type": "string"
+    },
+    "people": {
+      "type": "integer"
+    },
+    "family_members": {
+      "type": "boolean"
+    },
+    "latest_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "horizon": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "evidence": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "city",
+    "category",
+    "service",
+    "people",
+    "family_members",
+    "latest_at",
+    "horizon",
+    "evidence"
+  ]
+}

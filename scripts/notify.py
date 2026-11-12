@@ -199,7 +199,7 @@ def truncate_alarmer_message(text: str, max_chars: int = MAX_ALARMER_MESSAGE_CHA
     return text[: max_chars - len(suffix)].rstrip() + suffix
 
 
-def send_alarmer_message(key: str, text: str, timeout_seconds: float = 10.0) -> bool:
+def send_alarmer_message(key: str, text: str, timeout_seconds: float = 30.0) -> bool:
     original_text_length = len(text)
     text = truncate_alarmer_message(text)
     response = requests.get(
